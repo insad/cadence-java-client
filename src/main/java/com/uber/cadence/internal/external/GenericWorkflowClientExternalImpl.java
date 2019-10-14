@@ -78,8 +78,10 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     } finally {
       // TODO: can probably cache this
       Map<String, String> tags =
-          new ImmutableMap.Builder<String, String>(1)
+          new ImmutableMap.Builder<String, String>(3)
               .put(MetricsTag.WORKFLOW_TYPE, startParameters.getWorkflowType().getName())
+              .put(MetricsTag.TASK_LIST, startParameters.getTaskList())
+              .put(MetricsTag.DOMAIN, domain)
               .build();
       metricsScope.tagged(tags).counter(MetricsType.WORKFLOW_START_COUNTER).inc(1);
     }
@@ -203,6 +205,23 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
   @Override
   public WorkflowExecution signalWithStartWorkflowExecution(
       SignalWithStartWorkflowExecutionParameters parameters) {
+    try {
+      return signalWithStartWorkflowInternal(parameters);
+    } finally {
+      Map<String, String> tags =
+          new ImmutableMap.Builder<String, String>(3)
+              .put(
+                  MetricsTag.WORKFLOW_TYPE,
+                  parameters.getStartParameters().getWorkflowType().getName())
+              .put(MetricsTag.TASK_LIST, parameters.getStartParameters().getTaskList())
+              .put(MetricsTag.DOMAIN, domain)
+              .build();
+      metricsScope.tagged(tags).counter(MetricsType.WORKFLOW_SIGNAL_WITH_START_COUNTER).inc(1);
+    }
+  }
+
+  private WorkflowExecution signalWithStartWorkflowInternal(
+      SignalWithStartWorkflowExecutionParameters parameters) {
     SignalWithStartWorkflowExecutionRequest request = new SignalWithStartWorkflowExecutionRequest();
     request.setDomain(domain);
     StartWorkflowExecutionParameters startParameters = parameters.getStartParameters();
@@ -268,7 +287,7 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
   }
 
   @Override
-  public byte[] queryWorkflow(QueryWorkflowParameters queryParameters) {
+  public QueryWorkflowResponse queryWorkflow(QueryWorkflowParameters queryParameters) {
     QueryWorkflowRequest request = new QueryWorkflowRequest();
     request.setDomain(domain);
     WorkflowExecution execution = new WorkflowExecution();
@@ -278,12 +297,13 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     query.setQueryArgs(queryParameters.getInput());
     query.setQueryType(queryParameters.getQueryType());
     request.setQuery(query);
+    request.setQueryRejectCondition(queryParameters.getQueryRejectCondition());
     try {
       QueryWorkflowResponse response =
           Retryer.retryWithResult(
               Retryer.DEFAULT_SERVICE_OPERATION_RETRY_OPTIONS,
               () -> service.QueryWorkflow(request));
-      return response.getQueryResult();
+      return response;
     } catch (TException e) {
       throw CheckedExceptionWrapper.wrap(e);
     }

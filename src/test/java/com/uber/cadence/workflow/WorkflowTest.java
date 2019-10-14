@@ -30,10 +30,12 @@ import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.uber.cadence.GetWorkflowExecutionHistoryResponse;
 import com.uber.cadence.HistoryEvent;
 import com.uber.cadence.Memo;
+import com.uber.cadence.QueryRejectCondition;
 import com.uber.cadence.SearchAttributes;
 import com.uber.cadence.SignalExternalWorkflowExecutionFailedCause;
 import com.uber.cadence.TimeoutType;
 import com.uber.cadence.WorkflowExecution;
+import com.uber.cadence.WorkflowExecutionCloseStatus;
 import com.uber.cadence.WorkflowIdReusePolicy;
 import com.uber.cadence.activity.Activity;
 import com.uber.cadence.activity.ActivityMethod;
@@ -57,6 +59,7 @@ import com.uber.cadence.common.CronSchedule;
 import com.uber.cadence.common.MethodRetry;
 import com.uber.cadence.common.RetryOptions;
 import com.uber.cadence.converter.JsonDataConverter;
+import com.uber.cadence.internal.common.QueryResponse;
 import com.uber.cadence.internal.common.WorkflowExecutionUtils;
 import com.uber.cadence.internal.sync.DeterministicRunnerTest;
 import com.uber.cadence.internal.worker.PollerOptions;
@@ -2453,6 +2456,12 @@ public class WorkflowTest {
         });
     execution.set(client.start());
     assertEquals("Hello World!", client.getResult(String.class));
+    assertEquals("World!", client.query("QueryableWorkflow::getState", String.class));
+    QueryResponse<String> queryResponse =
+        client.query("QueryableWorkflow::getState", String.class, QueryRejectCondition.NOT_OPEN);
+    assertNull(queryResponse.getResult());
+    assertEquals(
+        WorkflowExecutionCloseStatus.COMPLETED, queryResponse.getQueryRejected().closeStatus);
   }
 
   static final AtomicInteger decisionCount = new AtomicInteger();
@@ -2548,7 +2557,7 @@ public class WorkflowTest {
   public interface ITestChild {
 
     @WorkflowMethod
-    String execute(String arg);
+    String execute(String arg, int delay);
   }
 
   public interface ITestNamedChild {
@@ -2572,17 +2581,39 @@ public class WorkflowTest {
 
     @Override
     public String execute(String taskList) {
-      Promise<String> r1 = Async.function(child1::execute, "Hello ");
+      Promise<String> r1 = Async.function(child1::execute, "Hello ", 0);
       String r2 = child2.execute("World!");
       assertEquals(child2Id, Workflow.getWorkflowExecution(child2).get().getWorkflowId());
       return r1.get() + r2;
     }
   }
 
+  public static class TestParentWorkflowWithChildTimeout implements TestWorkflow1 {
+
+    private final ITestChild child;
+
+    public TestParentWorkflowWithChildTimeout() {
+      ChildWorkflowOptions.Builder options = new ChildWorkflowOptions.Builder();
+      options.setExecutionStartToCloseTimeout(Duration.ofSeconds(1));
+      child = Workflow.newChildWorkflowStub(ITestChild.class, options.build());
+    }
+
+    @Override
+    public String execute(String taskList) {
+      try {
+        child.execute("Hello ", (int) Duration.ofDays(1).toMillis());
+      } catch (Exception e) {
+        return e.getClass().getSimpleName();
+      }
+      throw new RuntimeException("not reachable");
+    }
+  }
+
   public static class TestChild implements ITestChild {
 
     @Override
-    public String execute(String arg) {
+    public String execute(String arg, int delay) {
+      Workflow.sleep(delay);
       return arg.toUpperCase();
     }
   }
@@ -2606,6 +2637,19 @@ public class WorkflowTest {
     options.setTaskList(taskList);
     TestWorkflow1 client = workflowClient.newWorkflowStub(TestWorkflow1.class, options.build());
     assertEquals("HELLO WORLD!", client.execute(taskList));
+  }
+
+  @Test
+  public void testChildWorkflowTimeout() {
+    child2Id = UUID.randomUUID().toString();
+    startWorkerFor(TestParentWorkflowWithChildTimeout.class, TestChild.class);
+
+    WorkflowOptions.Builder options = new WorkflowOptions.Builder();
+    options.setExecutionStartToCloseTimeout(Duration.ofSeconds(200));
+    options.setTaskStartToCloseTimeout(Duration.ofSeconds(60));
+    options.setTaskList(taskList);
+    TestWorkflow1 client = workflowClient.newWorkflowStub(TestWorkflow1.class, options.build());
+    assertEquals("ChildWorkflowTimedOutException", client.execute(taskList));
   }
 
   private static String childReexecuteId = UUID.randomUUID().toString();
@@ -2717,7 +2761,7 @@ public class WorkflowTest {
               .build();
       child = Workflow.newChildWorkflowStub(ITestChild.class, options);
 
-      return child.execute(taskList);
+      return child.execute(taskList, 0);
     }
   }
 
@@ -2744,7 +2788,7 @@ public class WorkflowTest {
   public static class AngryChild implements ITestChild {
 
     @Override
-    public String execute(String taskList) {
+    public String execute(String taskList, int delay) {
       AngryChildActivity activity =
           Workflow.newActivityStub(
               AngryChildActivity.class,
@@ -2998,7 +3042,7 @@ public class WorkflowTest {
                       .build())
               .build();
       child = Workflow.newChildWorkflowStub(ITestChild.class, options);
-      return Async.function(child::execute, taskList).get();
+      return Async.function(child::execute, taskList, 0).get();
     }
   }
 
@@ -5148,6 +5192,63 @@ public class WorkflowTest {
     assertTrue(
         tracer.getTrace().contains("executeChildWorkflow TestCompensationWorkflow::compensate"));
     assertTrue(tracer.getTrace().contains("executeActivity TestActivities::activity2"));
+  }
+
+  public static class TestSignalExceptionWorkflowImpl implements TestWorkflowSignaled {
+    private boolean signaled = false;
+
+    @Override
+    public String execute() {
+      Workflow.await(() -> signaled);
+      return null;
+    }
+
+    @Override
+    public void signal1(String arg) {
+      for (int i = 0; i < 100; i++) {
+        Async.procedure(() -> System.out.println("test"));
+      }
+
+      throw new RuntimeException("exception in signal method");
+    }
+  }
+
+  @Test
+  public void testExceptionInSignal() throws InterruptedException {
+    startWorkerFor(TestSignalExceptionWorkflowImpl.class);
+    TestWorkflowSignaled signalWorkflow =
+        workflowClient.newWorkflowStub(
+            TestWorkflowSignaled.class, newWorkflowOptionsBuilder(taskList).build());
+    CompletableFuture<String> result = WorkflowClient.execute(signalWorkflow::execute);
+    signalWorkflow.signal1("test");
+    try {
+      result.get(1, TimeUnit.SECONDS);
+      fail("not reachable");
+    } catch (Exception e) {
+      // exception expected here.
+    }
+
+    // Suspend polling so that decision tasks are not retried. Otherwise it will affect our thread
+    // count.
+    if (useExternalService) {
+      workerFactory.suspendPolling();
+    } else {
+      testEnvironment.getWorkerFactory().suspendPolling();
+    }
+
+    // Wait for decision task retry to finish.
+    Thread.sleep(10000);
+
+    int workflowThreads = 0;
+    ThreadInfo[] threads = ManagementFactory.getThreadMXBean().dumpAllThreads(false, false);
+    for (ThreadInfo thread : threads) {
+      if (thread.getThreadName().startsWith("workflow")) {
+        workflowThreads++;
+      }
+    }
+
+    assertTrue(
+        "workflow threads might leak, #workflowThreads = " + workflowThreads, workflowThreads < 20);
   }
 
   private static class TracingWorkflowInterceptor implements WorkflowInterceptor {

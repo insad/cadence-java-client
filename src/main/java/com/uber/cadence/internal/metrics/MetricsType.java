@@ -53,6 +53,8 @@ public class MetricsType {
       CADENCE_METRICS_PREFIX + "decision-poll-succeed";
   public static final String DECISION_POLL_LATENCY =
       CADENCE_METRICS_PREFIX + "decision-poll-latency"; // measure succeed poll request latency
+  public static final String DECISION_SCHEDULED_TO_START_LATENCY =
+      CADENCE_METRICS_PREFIX + "decision-scheduled-to-start-latency";
   public static final String DECISION_EXECUTION_FAILED_COUNTER =
       CADENCE_METRICS_PREFIX + "decision-execution-failed";
   public static final String DECISION_EXECUTION_LATENCY =
@@ -77,6 +79,8 @@ public class MetricsType {
       CADENCE_METRICS_PREFIX + "activity-poll-succeed";
   public static final String ACTIVITY_POLL_LATENCY =
       CADENCE_METRICS_PREFIX + "activity-poll-latency";
+  public static final String ACTIVITY_SCHEDULED_TO_START_LATENCY =
+      CADENCE_METRICS_PREFIX + "activity-scheduled-to-start-latency";
   public static final String ACTIVITY_EXEC_FAILED_COUNTER =
       CADENCE_METRICS_PREFIX + "activity-execution-failed";
   public static final String ACTIVITY_EXEC_LATENCY =
@@ -109,7 +113,7 @@ public class MetricsType {
       CADENCE_METRICS_PREFIX + "local-activity-canceled";
   public static final String LOCAL_ACTIVITY_FAILED_COUNTER =
       CADENCE_METRICS_PREFIX + "local-activity-failed";
-  public static final String LOCAL_ACTIVITY_PANIC_COUNTER =
+  public static final String LOCAL_ACTIVITY_ERROR_COUNTER =
       CADENCE_METRICS_PREFIX + "local-activity-panic";
   public static final String LOCAL_ACTIVITY_EXECUTION_LATENCY =
       CADENCE_METRICS_PREFIX + "local-activity-execution-latency";
@@ -120,7 +124,6 @@ public class MetricsType {
 
   public static final String UNHANDLED_SIGNALS_COUNTER =
       CADENCE_METRICS_PREFIX + "unhandled-signals";
-
   public static final String CORRUPTED_SIGNALS_COUNTER =
       CADENCE_METRICS_PREFIX + "corrupted-signals";
 
