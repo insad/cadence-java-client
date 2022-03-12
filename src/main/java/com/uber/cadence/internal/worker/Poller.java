@@ -22,9 +22,14 @@ import com.uber.cadence.internal.common.InternalUtils;
 import com.uber.cadence.internal.metrics.MetricsType;
 import com.uber.m3.tally.Scope;
 import java.util.Objects;
-import java.util.concurrent.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.thrift.TException;
+import org.apache.thrift.transport.TTransportException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,7 +57,17 @@ public final class Poller<T> implements SuspendableWorker {
   private Throttler pollRateThrottler;
 
   private Thread.UncaughtExceptionHandler uncaughtExceptionHandler =
-      (t, e) -> log.error("Failure in thread " + t.getName(), e);
+      (t, e) -> {
+        if (e instanceof TTransportException) {
+          TTransportException te = (TTransportException) e;
+          if (te.getType() == TTransportException.TIMED_OUT) {
+            log.warn("Failure in thread " + t.getName(), e);
+            return;
+          }
+        }
+
+        log.error("Failure in thread " + t.getName(), e);
+      };
 
   public Poller(
       String identity,
@@ -75,8 +90,8 @@ public final class Poller<T> implements SuspendableWorker {
 
   @Override
   public void start() {
-    if (log.isInfoEnabled()) {
-      log.info("start(): " + toString());
+    if (log.isDebugEnabled()) {
+      log.debug("start(): " + toString());
     }
     if (pollerOptions.getMaximumPollRatePerSecond() > 0.0) {
       pollRateThrottler =
@@ -128,7 +143,7 @@ public final class Poller<T> implements SuspendableWorker {
 
   @Override
   public void shutdown() {
-    log.info("shutdown");
+    log.debug("shutdown");
     if (!isStarted()) {
       return;
     }
@@ -144,8 +159,8 @@ public final class Poller<T> implements SuspendableWorker {
 
   @Override
   public void shutdownNow() {
-    if (log.isInfoEnabled()) {
-      log.info("shutdownNow poller=" + this.pollerOptions.getPollThreadNamePrefix());
+    if (log.isDebugEnabled()) {
+      log.debug("shutdownNow poller=" + this.pollerOptions.getPollThreadNamePrefix());
     }
     if (!isStarted()) {
       return;
@@ -234,13 +249,15 @@ public final class Poller<T> implements SuspendableWorker {
         if (!pollExecutor.isTerminating()) {
           pollExecutor.execute(this);
         } else {
-          log.info("poll loop done");
+          log.debug("poll loop done");
         }
       }
     }
   }
 
   private class PollExecutionTask implements Poller.ThrowingRunnable {
+    private static final int EXECUTOR_CAPACITY_CHECK_INTERVAL_MS = 100;
+    private static final int EXECUTOR_CAPACITY_CHECK_OFFSET_MS = 10;
     private Semaphore pollSemaphore;
 
     PollExecutionTask() {
@@ -257,7 +274,31 @@ public final class Poller<T> implements SuspendableWorker {
         }
         taskExecutor.process(task);
       } finally {
+        releasePollSemaphore();
+      }
+    }
+
+    private void releasePollSemaphore() {
+      if (!pollerOptions.getPollOnlyIfExecutorHasCapacity()) {
         pollSemaphore.release();
+      } else {
+        while (true) {
+          // sleep to avoid racing condition
+          try {
+            Thread.sleep(EXECUTOR_CAPACITY_CHECK_OFFSET_MS);
+          } catch (InterruptedException ignored) {
+          }
+          if (taskExecutor.hasCapacity()) {
+            pollSemaphore.release();
+            break;
+          } else {
+            // sleep to avoid busy loop
+            try {
+              Thread.sleep(EXECUTOR_CAPACITY_CHECK_INTERVAL_MS);
+            } catch (InterruptedException ignored) {
+            }
+          }
+        }
       }
     }
   }

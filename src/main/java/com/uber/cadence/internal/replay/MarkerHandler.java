@@ -22,6 +22,7 @@ import com.uber.cadence.Header;
 import com.uber.cadence.HistoryEvent;
 import com.uber.cadence.MarkerRecordedEventAttributes;
 import com.uber.cadence.converter.DataConverter;
+import com.uber.cadence.internal.sync.WorkflowInternal;
 import com.uber.cadence.workflow.Functions.Func1;
 import com.uber.m3.util.ImmutableMap;
 import java.nio.ByteBuffer;
@@ -174,6 +175,24 @@ class MarkerHandler {
     }
   }
 
+  static final class HandleResult {
+    private Optional<byte[]> storedData;
+    private boolean isNewlyStored;
+
+    HandleResult(final Optional<byte[]> storedData, final boolean isNewlyStored) {
+      this.storedData = storedData;
+      this.isNewlyStored = isNewlyStored;
+    }
+
+    public boolean isNewlyStored() {
+      return isNewlyStored;
+    }
+
+    public Optional<byte[]> getStoredData() {
+      return storedData;
+    }
+  }
+
   private final DecisionsHelper decisions;
   private final String markerName;
   private final ReplayAware replayContext;
@@ -193,7 +212,7 @@ class MarkerHandler {
    *     nothing is recorded into the history.
    * @return the latest value returned by func
    */
-  Optional<byte[]> handle(
+  HandleResult handle(
       String id, DataConverter converter, Func1<Optional<byte[]>, Optional<byte[]>> func) {
     MarkerResult result = mutableMarkerResults.get(id);
     Optional<byte[]> stored;
@@ -210,17 +229,25 @@ class MarkerHandler {
       if (data.isPresent()) {
         // Need to insert marker to ensure that eventId is incremented
         recordMutableMarker(id, eventId, data.get(), accessCount, converter);
-        return data;
+        // also may need to increase for search attribute if using CadenceChangeVersion
+        decisions.addPossibleMissingDecisionForChangeVersionSearchAttribute();
+        return new HandleResult(data, false);
       }
-      return stored;
+
+      if (!stored.isPresent()) {
+        mutableMarkerResults.put(
+            id, new MarkerResult(converter.toData(WorkflowInternal.DEFAULT_VERSION)));
+      }
+
+      return new HandleResult(stored, false);
     }
     Optional<byte[]> toStore = func.apply(stored);
     if (toStore.isPresent()) {
       byte[] data = toStore.get();
       recordMutableMarker(id, eventId, data, accessCount, converter);
-      return toStore;
+      return new HandleResult(toStore, true);
     }
-    return stored;
+    return new HandleResult(stored, false);
   }
 
   private Optional<byte[]> getMarkerDataFromHistory(

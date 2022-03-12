@@ -26,6 +26,9 @@ import com.uber.cadence.internal.replay.DeciderCache;
 import com.uber.cadence.internal.replay.ReplayDecisionTaskHandler;
 import com.uber.cadence.internal.worker.DecisionTaskHandler;
 import com.uber.cadence.internal.worker.LocalActivityWorker;
+import com.uber.cadence.internal.worker.LocallyDispatchedActivityWorker;
+import com.uber.cadence.internal.worker.LocallyDispatchedActivityWorker.Task;
+import com.uber.cadence.internal.worker.NoopSuspendableWorker;
 import com.uber.cadence.internal.worker.SingleWorkerOptions;
 import com.uber.cadence.internal.worker.SuspendableWorker;
 import com.uber.cadence.internal.worker.WorkflowWorker;
@@ -36,10 +39,7 @@ import com.uber.cadence.workflow.WorkflowInterceptor;
 import java.lang.reflect.Type;
 import java.time.Duration;
 import java.util.Objects;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -53,6 +53,10 @@ public class SyncWorkflowWorker
   private final DataConverter dataConverter;
   private final POJOActivityTaskHandler laTaskHandler;
   private final ScheduledExecutorService heartbeatExecutor = Executors.newScheduledThreadPool(4);
+  private final ScheduledExecutorService ldaHeartbeatExecutor = Executors.newScheduledThreadPool(4);
+  private SuspendableWorker ldaWorker;
+  private POJOActivityTaskHandler ldaTaskHandler;
+  private final IWorkflowService service;
 
   public SyncWorkflowWorker(
       IWorkflowService service,
@@ -61,16 +65,22 @@ public class SyncWorkflowWorker
       Function<WorkflowInterceptor, WorkflowInterceptor> interceptorFactory,
       SingleWorkerOptions workflowOptions,
       SingleWorkerOptions localActivityOptions,
+      SingleWorkerOptions locallyDispatchedActivityOptions,
       DeciderCache cache,
       String stickyTaskListName,
       Duration stickyDecisionScheduleToStartTimeout,
       ThreadPoolExecutor workflowThreadPool) {
     Objects.requireNonNull(workflowThreadPool);
     this.dataConverter = workflowOptions.getDataConverter();
+    this.service = service;
 
     factory =
         new POJOWorkflowImplementationFactory(
-            workflowOptions.getDataConverter(), workflowThreadPool, interceptorFactory, cache);
+            workflowOptions.getDataConverter(),
+            workflowThreadPool,
+            interceptorFactory,
+            cache,
+            workflowOptions.getContextPropagators());
 
     laTaskHandler =
         new POJOActivityTaskHandler(
@@ -88,9 +98,33 @@ public class SyncWorkflowWorker
             service,
             laWorker.getLocalActivityTaskPoller());
 
+    Function<Task, Boolean> locallyDispatchedActivityTaskPoller = null;
+    // do not dispatch locally if TaskListActivitiesPerSecond is set
+    if (locallyDispatchedActivityOptions.getTaskListActivitiesPerSecond() == 0) {
+      ldaTaskHandler =
+          new POJOActivityTaskHandler(
+              service,
+              domain,
+              locallyDispatchedActivityOptions.getDataConverter(),
+              ldaHeartbeatExecutor);
+      ldaWorker =
+          new LocallyDispatchedActivityWorker(
+              service, domain, taskList, locallyDispatchedActivityOptions, ldaTaskHandler);
+      locallyDispatchedActivityTaskPoller =
+          ((LocallyDispatchedActivityWorker) ldaWorker).getLocallyDispatchedActivityTaskPoller();
+    } else {
+      ldaWorker = new NoopSuspendableWorker();
+    }
+
     workflowWorker =
         new WorkflowWorker(
-            service, domain, taskList, workflowOptions, taskHandler, stickyTaskListName);
+            service,
+            domain,
+            taskList,
+            workflowOptions,
+            taskHandler,
+            locallyDispatchedActivityTaskPoller,
+            stickyTaskListName);
   }
 
   public void setWorkflowImplementationTypes(
@@ -111,42 +145,62 @@ public class SyncWorkflowWorker
     this.laTaskHandler.setLocalActivitiesImplementation(activitiesImplementation);
   }
 
+  public void setActivitiesImplementationToDispatchLocally(Object... activitiesImplementation) {
+    if (this.ldaTaskHandler != null) {
+      this.ldaTaskHandler.setActivitiesImplementation(activitiesImplementation);
+    }
+  }
+
   @Override
   public void start() {
     workflowWorker.start();
-    laWorker.start();
+    // workflowWorker doesn't start if no types are registered with it. In that case we don't need
+    // to start LocalActivity Worker.
+    if (workflowWorker.isStarted()) {
+      laWorker.start();
+      ldaWorker.start();
+    }
   }
 
   @Override
   public boolean isStarted() {
-    return workflowWorker.isStarted() && laWorker.isStarted();
+    return workflowWorker.isStarted() && laWorker.isStarted() && ldaWorker.isStarted();
   }
 
   @Override
   public boolean isShutdown() {
-    return workflowWorker.isShutdown() && laWorker.isShutdown();
+    return workflowWorker.isShutdown() && laWorker.isShutdown() && ldaWorker.isShutdown();
   }
 
   @Override
   public boolean isTerminated() {
-    return workflowWorker.isTerminated() && laWorker.isTerminated();
+    return workflowWorker.isTerminated()
+        && laWorker.isTerminated()
+        && ldaHeartbeatExecutor.isTerminated()
+        && ldaWorker.isTerminated();
   }
 
   @Override
   public void shutdown() {
     laWorker.shutdown();
+    ldaHeartbeatExecutor.shutdown();
+    ldaWorker.shutdown();
     workflowWorker.shutdown();
   }
 
   @Override
   public void shutdownNow() {
     laWorker.shutdownNow();
+    ldaHeartbeatExecutor.shutdownNow();
+    ldaWorker.shutdownNow();
     workflowWorker.shutdownNow();
   }
 
   @Override
   public void awaitTermination(long timeout, TimeUnit unit) {
     long timeoutMillis = InternalUtils.awaitTermination(laWorker, unit.toMillis(timeout));
+    timeoutMillis = InternalUtils.awaitTermination(ldaHeartbeatExecutor, timeoutMillis);
+    timeoutMillis = InternalUtils.awaitTermination(ldaWorker, timeoutMillis);
     InternalUtils.awaitTermination(workflowWorker, timeoutMillis);
   }
 
@@ -154,17 +208,19 @@ public class SyncWorkflowWorker
   public void suspendPolling() {
     workflowWorker.suspendPolling();
     laWorker.suspendPolling();
+    ldaWorker.suspendPolling();
   }
 
   @Override
   public void resumePolling() {
     workflowWorker.resumePolling();
     laWorker.resumePolling();
+    ldaWorker.resumePolling();
   }
 
   @Override
   public boolean isSuspended() {
-    return workflowWorker.isSuspended() && laWorker.isSuspended();
+    return workflowWorker.isSuspended() && laWorker.isSuspended() && ldaWorker.isSuspended();
   }
 
   public <R> R queryWorkflowExecution(
@@ -194,5 +250,9 @@ public class SyncWorkflowWorker
   @Override
   public void accept(PollForDecisionTaskResponse pollForDecisionTaskResponse) {
     workflowWorker.accept(pollForDecisionTaskResponse);
+  }
+
+  public CompletableFuture<Boolean> isHealthy() {
+    return service.isHealthy();
   }
 }

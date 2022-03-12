@@ -33,16 +33,15 @@ import com.uber.m3.util.ImmutableMap;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
+import java.util.Optional;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
-public final class LocalActivityWorker implements SuspendableWorker {
+public final class LocalActivityWorker extends SuspendableWorkerBase {
 
   private static final String POLL_THREAD_NAME_PREFIX = "Local Activity Poller taskList=";
 
-  private SuspendableWorker poller = new NoopSuspendableWorker();
   private final ActivityTaskHandler handler;
   private final String domain;
   private final String taskList;
@@ -59,18 +58,18 @@ public final class LocalActivityWorker implements SuspendableWorker {
     PollerOptions pollerOptions = options.getPollerOptions();
     if (pollerOptions.getPollThreadNamePrefix() == null) {
       pollerOptions =
-          new PollerOptions.Builder(pollerOptions)
+          PollerOptions.newBuilder(pollerOptions)
               .setPollThreadNamePrefix(
                   POLL_THREAD_NAME_PREFIX + "\"" + taskList + "\", domain=\"" + domain + "\"")
               .build();
     }
-    this.options = new SingleWorkerOptions.Builder(options).setPollerOptions(pollerOptions).build();
+    this.options = SingleWorkerOptions.newBuilder(options).setPollerOptions(pollerOptions).build();
   }
 
   @Override
   public void start() {
     if (handler.isAnyTypeSupported()) {
-      poller =
+      SuspendableWorker poller =
           new Poller<>(
               options.getIdentity(),
               laPollTask,
@@ -78,53 +77,9 @@ public final class LocalActivityWorker implements SuspendableWorker {
               options.getPollerOptions(),
               options.getMetricsScope());
       poller.start();
+      setPoller(poller);
       options.getMetricsScope().counter(MetricsType.WORKER_START_COUNTER).inc(1);
     }
-  }
-
-  @Override
-  public boolean isStarted() {
-    return poller.isStarted();
-  }
-
-  @Override
-  public boolean isShutdown() {
-    return poller.isShutdown();
-  }
-
-  @Override
-  public boolean isTerminated() {
-    return poller.isTerminated();
-  }
-
-  @Override
-  public void shutdown() {
-    poller.shutdown();
-  }
-
-  @Override
-  public void shutdownNow() {
-    poller.shutdownNow();
-  }
-
-  @Override
-  public void awaitTermination(long timeout, TimeUnit unit) {
-    poller.awaitTermination(timeout, unit);
-  }
-
-  @Override
-  public void suspendPolling() {
-    poller.suspendPolling();
-  }
-
-  @Override
-  public void resumePolling() {
-    poller.resumePolling();
-  }
-
-  @Override
-  public boolean isSuspended() {
-    return poller.isSuspended();
   }
 
   public static class Task {
@@ -163,6 +118,8 @@ public final class LocalActivityWorker implements SuspendableWorker {
 
     @Override
     public void handle(Task task) throws Exception {
+      propagateContext(task.params);
+
       task.taskStartTime = System.currentTimeMillis();
       ActivityTaskHandler.Result result = handleLocalActivity(task);
 
@@ -212,6 +169,11 @@ public final class LocalActivityWorker implements SuspendableWorker {
       metricsScope.counter(MetricsType.LOCAL_ACTIVITY_TOTAL_COUNTER).inc(1);
 
       PollForActivityTaskResponse pollTask = new PollForActivityTaskResponse();
+      pollTask.setWorkflowDomain(task.params.getWorkflowDomain());
+      pollTask.setActivityId(task.params.getActivityId());
+      pollTask.setWorkflowExecution(task.params.getWorkflowExecution());
+      pollTask.setScheduledTimestamp(System.currentTimeMillis());
+      pollTask.setStartedTimestamp(System.currentTimeMillis());
       pollTask.setActivityType(task.params.getActivityType());
       pollTask.setInput(task.params.getInput());
       pollTask.setAttempt(task.params.getAttempt());
@@ -250,5 +212,22 @@ public final class LocalActivityWorker implements SuspendableWorker {
         return result;
       }
     }
+  }
+
+  private void propagateContext(ExecuteLocalActivityParameters params) {
+    if (options.getContextPropagators() == null || options.getContextPropagators().isEmpty()) {
+      return;
+    }
+
+    Optional.ofNullable(params.getContext())
+        .filter(context -> !context.isEmpty())
+        .ifPresent(this::restoreContext);
+  }
+
+  private void restoreContext(Map<String, byte[]> context) {
+    options
+        .getContextPropagators()
+        .forEach(
+            propagator -> propagator.setCurrentContext(propagator.deserializeContext(context)));
   }
 }

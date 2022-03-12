@@ -17,6 +17,8 @@
 
 package com.uber.cadence.internal.replay;
 
+import static com.uber.cadence.internal.sync.WorkflowInternal.CADENCE_CHANGE_VERSION;
+
 import com.uber.cadence.ActivityTaskCancelRequestedEventAttributes;
 import com.uber.cadence.ActivityTaskCanceledEventAttributes;
 import com.uber.cadence.ActivityTaskScheduledEventAttributes;
@@ -44,6 +46,7 @@ import com.uber.cadence.RequestCancelActivityTaskFailedEventAttributes;
 import com.uber.cadence.RequestCancelExternalWorkflowExecutionDecisionAttributes;
 import com.uber.cadence.RequestCancelExternalWorkflowExecutionFailedEventAttributes;
 import com.uber.cadence.ScheduleActivityTaskDecisionAttributes;
+import com.uber.cadence.SearchAttributes;
 import com.uber.cadence.SignalExternalWorkflowExecutionDecisionAttributes;
 import com.uber.cadence.StartChildWorkflowExecutionDecisionAttributes;
 import com.uber.cadence.StartChildWorkflowExecutionFailedEventAttributes;
@@ -52,11 +55,17 @@ import com.uber.cadence.StartTimerDecisionAttributes;
 import com.uber.cadence.TaskList;
 import com.uber.cadence.TimerCanceledEventAttributes;
 import com.uber.cadence.TimerFiredEventAttributes;
+import com.uber.cadence.UpsertWorkflowSearchAttributesDecisionAttributes;
 import com.uber.cadence.WorkflowExecutionStartedEventAttributes;
 import com.uber.cadence.WorkflowType;
 import com.uber.cadence.internal.common.WorkflowExecutionUtils;
+import com.uber.cadence.internal.metrics.MetricsTag;
+import com.uber.cadence.internal.metrics.MetricsType;
 import com.uber.cadence.internal.replay.HistoryHelper.DecisionEvents;
+import com.uber.cadence.internal.worker.SingleWorkerOptions;
 import com.uber.cadence.internal.worker.WorkflowExecutionException;
+import com.uber.m3.tally.Scope;
+import com.uber.m3.util.ImmutableMap;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -84,6 +93,7 @@ class DecisionsHelper {
           + "change in the workflow definition.";
 
   private final PollForDecisionTaskResponse task;
+  private final SingleWorkerOptions options;
 
   /**
    * When workflow task completes the decisions are converted to events that follow the decision
@@ -103,8 +113,9 @@ class DecisionsHelper {
   // TODO: removal of completed activities
   private final Map<String, Long> activityIdToScheduledEventId = new HashMap<>();
 
-  DecisionsHelper(PollForDecisionTaskResponse task) {
+  DecisionsHelper(PollForDecisionTaskResponse task, SingleWorkerOptions options) {
     this.task = task;
+    this.options = options;
   }
 
   long getNextDecisionEventId() {
@@ -489,6 +500,9 @@ class DecisionsHelper {
     TaskList tl = new TaskList();
     tl.setName(taskList);
     attributes.setTaskList(tl);
+
+    attributes.setHeader(startedEvent.getHeader());
+
     Decision decision = new Decision();
     decision.setDecisionType(DecisionType.ContinueAsNewWorkflowExecution);
     decision.setContinueAsNewWorkflowExecutionDecisionAttributes(attributes);
@@ -543,6 +557,22 @@ class DecisionsHelper {
     long nextDecisionEventId = getNextDecisionEventId();
     DecisionId decisionId = new DecisionId(DecisionTarget.MARKER, nextDecisionEventId);
     addDecision(decisionId, new MarkerDecisionStateMachine(decisionId, decision));
+  }
+
+  void upsertSearchAttributes(SearchAttributes searchAttributes) {
+    addAllMissingVersionMarker(false, Optional.empty());
+
+    UpsertWorkflowSearchAttributesDecisionAttributes decisionAttr =
+        new UpsertWorkflowSearchAttributesDecisionAttributes()
+            .setSearchAttributes(searchAttributes);
+    Decision decision =
+        new Decision()
+            .setDecisionType(DecisionType.UpsertWorkflowSearchAttributes)
+            .setUpsertWorkflowSearchAttributesDecisionAttributes(decisionAttr);
+    long nextDecisionEventId = getNextDecisionEventId();
+    DecisionId decisionId =
+        new DecisionId(DecisionTarget.UPSERT_SEARCH_ATTRIBUTES, nextDecisionEventId);
+    addDecision(decisionId, new UpsertSearchAttributesDecisionStateMachine(decisionId, decision));
   }
 
   List<Decision> getDecisions() {
@@ -641,14 +671,48 @@ class DecisionsHelper {
     nextDecisionEventId++;
   }
 
+  // GetVersion API may use CadenceChangeVersion, or may not(legacy execution)
+  // This method only adds the decision if the upsert CadenceChangeVersion search attribute event
+  // exists in the history
+  public void addPossibleMissingDecisionForChangeVersionSearchAttribute() {
+    // add next possible event for CadenceChangeVersion search attribute
+    final Optional<HistoryEvent> optionalEvent = getOptionalDecisionEvent(nextDecisionEventId);
+    if (!optionalEvent.isPresent()) {
+      return;
+    }
+    if (optionalEvent.get().getEventType() != EventType.UpsertWorkflowSearchAttributes) {
+      return;
+    }
+    final SearchAttributes searchAttributes =
+        optionalEvent
+            .get()
+            .getUpsertWorkflowSearchAttributesEventAttributes()
+            .getSearchAttributes();
+    if (searchAttributes.getIndexedFields().containsKey(CADENCE_CHANGE_VERSION)) {
+      Decision upsertSearchAttrDecision =
+          new Decision()
+              .setDecisionType(DecisionType.UpsertWorkflowSearchAttributes)
+              .setUpsertWorkflowSearchAttributesDecisionAttributes(
+                  new UpsertWorkflowSearchAttributesDecisionAttributes()
+                      .setSearchAttributes(searchAttributes));
+      DecisionId decisionId =
+          new DecisionId(DecisionTarget.UPSERT_SEARCH_ATTRIBUTES, nextDecisionEventId);
+      addDecision(
+          decisionId,
+          new UpsertSearchAttributesDecisionStateMachine(decisionId, upsertSearchAttrDecision));
+      return;
+    }
+    return;
+  }
+
   // This is to support the case where a getVersion call presents during workflow execution but
   // is removed in replay.
   void addAllMissingVersionMarker(
       boolean isNextDecisionVersionMarker,
-      Optional<Predicate<MarkerRecordedEventAttributes>> isDifferentChange) {
+      Optional<Predicate<MarkerRecordedEventAttributes>> changeIdEquals) {
     boolean added;
     do {
-      added = addMissingVersionMarker(isNextDecisionVersionMarker, isDifferentChange);
+      added = addMissingVersionMarker(isNextDecisionVersionMarker, changeIdEquals);
     } while (added);
   }
 
@@ -690,15 +754,21 @@ class DecisionsHelper {
             .setDecisionType(DecisionType.RecordMarker)
             .setRecordMarkerDecisionAttributes(marker);
     DecisionId markerDecisionId = new DecisionId(DecisionTarget.MARKER, nextDecisionEventId);
-    decisions.put(
-        markerDecisionId, new MarkerDecisionStateMachine(markerDecisionId, markerDecision));
-    nextDecisionEventId++;
+
+    addDecision(markerDecisionId, new MarkerDecisionStateMachine(markerDecisionId, markerDecision));
+    // also may need to increase for search attribute if using CadenceChangeVersion
+    addPossibleMissingDecisionForChangeVersionSearchAttribute();
     return true;
   }
 
   private DecisionStateMachine getDecision(DecisionId decisionId) {
     DecisionStateMachine result = decisions.get(decisionId);
     if (result == null) {
+      Scope metricsScope =
+          options
+              .getMetricsScope()
+              .tagged(ImmutableMap.of(MetricsTag.WORKFLOW_TYPE, task.getWorkflowType().getName()));
+      metricsScope.counter(MetricsType.NON_DETERMINISTIC_ERROR).inc(1);
       throw new NonDeterminisicWorkflowError(
           "Unknown " + decisionId + ". " + NON_DETERMINISTIC_MESSAGE);
     }

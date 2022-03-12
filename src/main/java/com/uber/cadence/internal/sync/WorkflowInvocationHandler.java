@@ -23,13 +23,9 @@ import static com.uber.cadence.internal.common.InternalUtils.getWorkflowType;
 import com.google.common.base.Defaults;
 import com.uber.cadence.WorkflowExecution;
 import com.uber.cadence.WorkflowIdReusePolicy;
-import com.uber.cadence.client.DuplicateWorkflowException;
-import com.uber.cadence.client.WorkflowClientInterceptor;
-import com.uber.cadence.client.WorkflowOptions;
-import com.uber.cadence.client.WorkflowStub;
+import com.uber.cadence.client.*;
 import com.uber.cadence.common.CronSchedule;
 import com.uber.cadence.common.MethodRetry;
-import com.uber.cadence.converter.DataConverter;
 import com.uber.cadence.internal.common.InternalUtils;
 import com.uber.cadence.internal.external.GenericWorkflowClientExternal;
 import com.uber.cadence.workflow.QueryMethod;
@@ -38,12 +34,18 @@ import com.uber.cadence.workflow.WorkflowMethod;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * Dynamic implementation of a strongly typed workflow interface that can be used to start, signal
  * and query workflows from external processes.
  */
-class WorkflowInvocationHandler implements InvocationHandler {
+class WorkflowInvocationHandler implements InvocationHandler, Supplier<WorkflowStub> {
+
+  @Override
+  public WorkflowStub get() {
+    return untyped;
+  }
 
   public enum InvocationType {
     SYNC,
@@ -104,16 +106,16 @@ class WorkflowInvocationHandler implements InvocationHandler {
 
   WorkflowInvocationHandler(
       Class<?> workflowInterface,
+      WorkflowClientOptions clientOptions,
       GenericWorkflowClientExternal genericClient,
       WorkflowExecution execution,
-      DataConverter dataConverter,
       WorkflowClientInterceptor[] interceptors) {
     Method workflowMethod = getWorkflowMethod(workflowInterface);
     WorkflowMethod annotation = workflowMethod.getAnnotation(WorkflowMethod.class);
     String workflowType = getWorkflowType(workflowMethod, annotation);
 
     WorkflowStub stub =
-        new WorkflowStubImpl(genericClient, dataConverter, Optional.of(workflowType), execution);
+        new WorkflowStubImpl(clientOptions, genericClient, Optional.of(workflowType), execution);
     for (WorkflowClientInterceptor i : interceptors) {
       stub = i.newUntypedWorkflowStub(execution, Optional.of(workflowType), stub);
     }
@@ -122,9 +124,9 @@ class WorkflowInvocationHandler implements InvocationHandler {
 
   WorkflowInvocationHandler(
       Class<?> workflowInterface,
+      WorkflowClientOptions clientOptions,
       GenericWorkflowClientExternal genericClient,
       WorkflowOptions options,
-      DataConverter dataConverter,
       WorkflowClientInterceptor[] interceptors) {
     Method workflowMethod = getWorkflowMethod(workflowInterface);
     MethodRetry methodRetry = workflowMethod.getAnnotation(MethodRetry.class);
@@ -134,7 +136,7 @@ class WorkflowInvocationHandler implements InvocationHandler {
     WorkflowOptions mergedOptions =
         WorkflowOptions.merge(annotation, methodRetry, cronSchedule, options);
     WorkflowStub stub =
-        new WorkflowStubImpl(genericClient, dataConverter, workflowType, mergedOptions);
+        new WorkflowStubImpl(clientOptions, genericClient, workflowType, mergedOptions);
     for (WorkflowClientInterceptor i : interceptors) {
       stub = i.newUntypedWorkflowStub(workflowType, mergedOptions, stub);
     }

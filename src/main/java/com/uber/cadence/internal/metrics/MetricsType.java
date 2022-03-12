@@ -18,6 +18,7 @@
 package com.uber.cadence.internal.metrics;
 
 public class MetricsType {
+
   public static final String CADENCE_METRICS_PREFIX = "cadence-";
   public static final String WORKFLOW_START_COUNTER = CADENCE_METRICS_PREFIX + "workflow-start";
   public static final String WORKFLOW_COMPLETED_COUNTER =
@@ -67,6 +68,8 @@ public class MetricsType {
       CADENCE_METRICS_PREFIX + "decision-task-error";
   public static final String DECISION_TASK_COMPLETED_COUNTER =
       CADENCE_METRICS_PREFIX + "decision-task-completed";
+  public static final String DECISION_TASK_FORCE_COMPLETED =
+      CADENCE_METRICS_PREFIX + "decision-task-force-completed";
 
   public static final String ACTIVITY_POLL_COUNTER = CADENCE_METRICS_PREFIX + "activity-poll-total";
   public static final String ACTIVITY_POLL_FAILED_COUNTER =
@@ -117,7 +120,21 @@ public class MetricsType {
       CADENCE_METRICS_PREFIX + "local-activity-panic";
   public static final String LOCAL_ACTIVITY_EXECUTION_LATENCY =
       CADENCE_METRICS_PREFIX + "local-activity-execution-latency";
+  public static final String LOCALLY_DISPATCHED_ACTIVITY_POLL_TOTAL_COUNTER =
+      CADENCE_METRICS_PREFIX + "locally-dispatched-activity-poll-total";
+  public static final String LOCALLY_DISPATCHED_ACTIVITY_POLL_NO_TASK_COUNTER =
+      CADENCE_METRICS_PREFIX + "locally-dispatched-activity-poll-no-task";
+  public static final String LOCALLY_DISPATCHED_ACTIVITY_POLL_SUCCEED_COUNTER =
+      CADENCE_METRICS_PREFIX + "locally-dispatched-activity-poll-succeed";
+  public static final String ACTIVITY_LOCAL_DISPATCH_FAILED_COUNTER =
+      CADENCE_METRICS_PREFIX + "activity-local-dispatch-failed";
+  public static final String ACTIVITY_LOCAL_DISPATCH_SUCCEED_COUNTER =
+      CADENCE_METRICS_PREFIX + "activity-local-dispatch-succeed";
   public static final String WORKER_PANIC_COUNTER = CADENCE_METRICS_PREFIX + "worker-panic";
+  public static final String LOCAL_ACTIVITY_ACTIVE_THREAD_COUNT =
+      CADENCE_METRICS_PREFIX + "local_activity_active_thread_count";
+  public static final String ACTIVITY_ACTIVE_THREAD_COUNT =
+      CADENCE_METRICS_PREFIX + "activity_active_thread_count";
 
   public static final String TASK_LIST_QUEUE_LATENCY =
       CADENCE_METRICS_PREFIX + "tasklist-queue-latency";
@@ -145,4 +162,12 @@ public class MetricsType {
   public static final String STICKY_CACHE_SIZE = CADENCE_METRICS_PREFIX + "sticky-cache-size";
   public static final String WORKFLOW_ACTIVE_THREAD_COUNT =
       CADENCE_METRICS_PREFIX + "workflow_active_thread_count";
+
+  public static final String NON_DETERMINISTIC_ERROR =
+      CADENCE_METRICS_PREFIX + "non-deterministic-error";
+
+  public static final String REPLAY_FAILED_COUNTER = CADENCE_METRICS_PREFIX + "replay-failed";
+  public static final String REPLAY_SKIPPED_COUNTER = CADENCE_METRICS_PREFIX + "replay-skipped";
+  public static final String REPLAY_SUCCESS_COUNTER = CADENCE_METRICS_PREFIX + "replay-succeed";
+  public static final String REPLAY_LATENCY = CADENCE_METRICS_PREFIX + "replay-latency";
 }

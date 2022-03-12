@@ -19,13 +19,15 @@ package com.uber.cadence.workflow;
 
 import static com.uber.cadence.internal.common.OptionsUtils.roundUpToSeconds;
 
-import com.uber.cadence.ChildPolicy;
+import com.uber.cadence.ParentClosePolicy;
 import com.uber.cadence.WorkflowIdReusePolicy;
 import com.uber.cadence.common.CronSchedule;
 import com.uber.cadence.common.MethodRetry;
 import com.uber.cadence.common.RetryOptions;
+import com.uber.cadence.context.ContextPropagator;
 import com.uber.cadence.internal.common.OptionsUtils;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -54,8 +56,10 @@ public final class ChildWorkflowOptions {
         .setTaskList(OptionsUtils.merge(a.taskList(), o.getTaskList(), String.class))
         .setRetryOptions(RetryOptions.merge(r, o.getRetryOptions()))
         .setCronSchedule(OptionsUtils.merge(cronAnnotation, o.getCronSchedule(), String.class))
+        .setParentClosePolicy(o.getParentClosePolicy())
         .setMemo(o.getMemo())
         .setSearchAttributes(o.getSearchAttributes())
+        .setContextPropagators(o.getContextPropagators())
         .validateAndBuildWithDefaults();
   }
 
@@ -73,15 +77,17 @@ public final class ChildWorkflowOptions {
 
     private String taskList;
 
-    private ChildPolicy childPolicy;
-
     private RetryOptions retryOptions;
 
     private String cronSchedule;
 
+    private ParentClosePolicy parentClosePolicy;
+
     private Map<String, Object> memo;
 
     private Map<String, Object> searchAttributes;
+
+    private List<ContextPropagator> contextPropagators;
 
     public Builder() {}
 
@@ -95,11 +101,12 @@ public final class ChildWorkflowOptions {
       this.executionStartToCloseTimeout = source.getExecutionStartToCloseTimeout();
       this.taskStartToCloseTimeout = source.getTaskStartToCloseTimeout();
       this.taskList = source.getTaskList();
-      this.childPolicy = source.getChildPolicy();
       this.retryOptions = source.getRetryOptions();
       this.cronSchedule = source.getCronSchedule();
+      this.parentClosePolicy = source.getParentClosePolicy();
       this.memo = source.getMemo();
       this.searchAttributes = source.getSearchAttributes();
+      this.contextPropagators = source.getContextPropagators();
     }
 
     /**
@@ -178,12 +185,6 @@ public final class ChildWorkflowOptions {
       return this;
     }
 
-    /** Specifies how children of this workflow react to this workflow death. */
-    public Builder setChildPolicy(ChildPolicy childPolicy) {
-      this.childPolicy = childPolicy;
-      return this;
-    }
-
     /**
      * RetryOptions that define how child workflow is retried in case of failure. Default is null
      * which is no reties.
@@ -195,6 +196,12 @@ public final class ChildWorkflowOptions {
 
     public Builder setCronSchedule(String cronSchedule) {
       this.cronSchedule = cronSchedule;
+      return this;
+    }
+
+    /** Specifies how this workflow reacts to the death of the parent workflow. */
+    public Builder setParentClosePolicy(ParentClosePolicy parentClosePolicy) {
+      this.parentClosePolicy = parentClosePolicy;
       return this;
     }
 
@@ -210,6 +217,12 @@ public final class ChildWorkflowOptions {
       return this;
     }
 
+    /** Specifies the list of context propagators to use during this workflow. */
+    public Builder setContextPropagators(List<ContextPropagator> contextPropagators) {
+      this.contextPropagators = contextPropagators;
+      return this;
+    }
+
     public ChildWorkflowOptions build() {
       return new ChildWorkflowOptions(
           domain,
@@ -219,10 +232,11 @@ public final class ChildWorkflowOptions {
           taskStartToCloseTimeout,
           taskList,
           retryOptions,
-          childPolicy,
           cronSchedule,
+          parentClosePolicy,
           memo,
-          searchAttributes);
+          searchAttributes,
+          contextPropagators);
     }
 
     public ChildWorkflowOptions validateAndBuildWithDefaults() {
@@ -234,10 +248,11 @@ public final class ChildWorkflowOptions {
           roundUpToSeconds(taskStartToCloseTimeout),
           taskList,
           retryOptions,
-          childPolicy,
           cronSchedule,
+          parentClosePolicy,
           memo,
-          searchAttributes);
+          searchAttributes,
+          contextPropagators);
     }
   }
 
@@ -255,13 +270,15 @@ public final class ChildWorkflowOptions {
 
   private final RetryOptions retryOptions;
 
-  private final ChildPolicy childPolicy;
-
   private final String cronSchedule;
+
+  private final ParentClosePolicy parentClosePolicy;
 
   private final Map<String, Object> memo;
 
   private final Map<String, Object> searchAttributes;
+
+  private List<ContextPropagator> contextPropagators;
 
   private ChildWorkflowOptions(
       String domain,
@@ -271,10 +288,11 @@ public final class ChildWorkflowOptions {
       Duration taskStartToCloseTimeout,
       String taskList,
       RetryOptions retryOptions,
-      ChildPolicy childPolicy,
       String cronSchedule,
+      ParentClosePolicy parentClosePolicy,
       Map<String, Object> memo,
-      Map<String, Object> searchAttributes) {
+      Map<String, Object> searchAttributes,
+      List<ContextPropagator> contextPropagators) {
     this.domain = domain;
     this.workflowId = workflowId;
     this.workflowIdReusePolicy = workflowIdReusePolicy;
@@ -282,10 +300,11 @@ public final class ChildWorkflowOptions {
     this.taskStartToCloseTimeout = taskStartToCloseTimeout;
     this.taskList = taskList;
     this.retryOptions = retryOptions;
-    this.childPolicy = childPolicy;
     this.cronSchedule = cronSchedule;
+    this.parentClosePolicy = parentClosePolicy;
     this.memo = memo;
     this.searchAttributes = searchAttributes;
+    this.contextPropagators = contextPropagators;
   }
 
   public String getDomain() {
@@ -312,10 +331,6 @@ public final class ChildWorkflowOptions {
     return taskList;
   }
 
-  public ChildPolicy getChildPolicy() {
-    return childPolicy;
-  }
-
   public RetryOptions getRetryOptions() {
     return retryOptions;
   }
@@ -324,12 +339,20 @@ public final class ChildWorkflowOptions {
     return cronSchedule;
   }
 
+  public ParentClosePolicy getParentClosePolicy() {
+    return parentClosePolicy;
+  }
+
   public Map<String, Object> getMemo() {
     return memo;
   }
 
   public Map<String, Object> getSearchAttributes() {
     return searchAttributes;
+  }
+
+  public List<ContextPropagator> getContextPropagators() {
+    return contextPropagators;
   }
 
   @Override
@@ -345,10 +368,11 @@ public final class ChildWorkflowOptions {
         && Objects.equals(taskStartToCloseTimeout, that.taskStartToCloseTimeout)
         && Objects.equals(taskList, that.taskList)
         && Objects.equals(retryOptions, that.retryOptions)
-        && childPolicy == that.childPolicy
         && Objects.equals(cronSchedule, that.cronSchedule)
+        && Objects.equals(parentClosePolicy, that.parentClosePolicy)
         && Objects.equals(memo, that.memo)
-        && Objects.equals(searchAttributes, that.searchAttributes);
+        && Objects.equals(searchAttributes, that.searchAttributes)
+        && Objects.equals(contextPropagators, that.contextPropagators);
   }
 
   @Override
@@ -361,10 +385,11 @@ public final class ChildWorkflowOptions {
         taskStartToCloseTimeout,
         taskList,
         retryOptions,
-        childPolicy,
         cronSchedule,
+        parentClosePolicy,
         memo,
-        searchAttributes);
+        searchAttributes,
+        contextPropagators);
   }
 
   @Override
@@ -387,15 +412,17 @@ public final class ChildWorkflowOptions {
         + '\''
         + ", retryOptions="
         + retryOptions
-        + ", childPolicy="
-        + childPolicy
         + ", cronSchedule="
         + cronSchedule
+        + ", parentClosePolicy="
+        + parentClosePolicy
         + ", memo='"
         + memo
         + '\''
         + ", searchAttributes='"
         + searchAttributes
+        + ", contextPropagators='"
+        + contextPropagators
         + '\''
         + '}';
   }

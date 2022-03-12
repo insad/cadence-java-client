@@ -17,7 +17,6 @@
 
 package com.uber.cadence.internal.common;
 
-import com.uber.cadence.ChildPolicy;
 import com.uber.cadence.WorkflowIdReusePolicy;
 import com.uber.cadence.WorkflowType;
 import com.uber.cadence.client.WorkflowOptions;
@@ -43,8 +42,6 @@ public final class StartWorkflowExecutionParameters {
 
   private long taskStartToCloseTimeoutSeconds;
 
-  private ChildPolicy childPolicy;
-
   private WorkflowIdReusePolicy workflowIdReusePolicy;
 
   private RetryParameters retryParameters;
@@ -54,6 +51,10 @@ public final class StartWorkflowExecutionParameters {
   private Map<String, byte[]> memo;
 
   private Map<String, byte[]> searchAttributes;
+
+  private Map<String, byte[]> context;
+
+  private Duration delayStart;
 
   /**
    * Returns the value of the WorkflowId property for this object.
@@ -268,19 +269,6 @@ public final class StartWorkflowExecutionParameters {
     return this;
   }
 
-  public ChildPolicy getChildPolicy() {
-    return childPolicy;
-  }
-
-  public void setChildPolicy(ChildPolicy childPolicy) {
-    this.childPolicy = childPolicy;
-  }
-
-  public StartWorkflowExecutionParameters withChildPolicy(ChildPolicy childPolicy) {
-    this.childPolicy = childPolicy;
-    return this;
-  }
-
   public RetryParameters getRetryParameters() {
     return retryParameters;
   }
@@ -313,6 +301,22 @@ public final class StartWorkflowExecutionParameters {
     this.searchAttributes = searchAttributes;
   }
 
+  public Map<String, byte[]> getContext() {
+    return context;
+  }
+
+  public void setContext(Map<String, byte[]> context) {
+    this.context = context;
+  }
+
+  public void setDelayStart(Duration delayStart) {
+    this.delayStart = delayStart;
+  }
+
+  public Duration getDelayStart() {
+    return delayStart;
+  }
+
   public StartWorkflowExecutionParameters withRetryParameters(RetryParameters retryParameters) {
     this.retryParameters = retryParameters;
     return this;
@@ -324,7 +328,6 @@ public final class StartWorkflowExecutionParameters {
         getSeconds(options.getExecutionStartToCloseTimeout()));
     parameters.setTaskStartToCloseTimeoutSeconds(getSeconds(options.getTaskStartToCloseTimeout()));
     parameters.setTaskList(options.getTaskList());
-    parameters.setChildPolicy(options.getChildPolicy());
     parameters.setWorkflowIdReusePolicy(options.getWorkflowIdReusePolicy());
     RetryOptions retryOptions = options.getRetryOptions();
     if (retryOptions != null) {
@@ -376,8 +379,6 @@ public final class StartWorkflowExecutionParameters {
         + executionStartToCloseTimeoutSeconds
         + ", taskStartToCloseTimeoutSeconds="
         + taskStartToCloseTimeoutSeconds
-        + ", childPolicy="
-        + childPolicy
         + ", workflowIdReusePolicy="
         + workflowIdReusePolicy
         + ", retryParameters="
@@ -390,6 +391,10 @@ public final class StartWorkflowExecutionParameters {
         + '\''
         + ", searchAttributes='"
         + searchAttributes
+        + ", context='"
+        + context
+        + ", delayStart='"
+        + delayStart
         + '\''
         + '}';
   }
@@ -405,12 +410,13 @@ public final class StartWorkflowExecutionParameters {
         && Objects.equals(workflowType, that.workflowType)
         && Objects.equals(taskList, that.taskList)
         && Arrays.equals(input, that.input)
-        && childPolicy == that.childPolicy
         && workflowIdReusePolicy == that.workflowIdReusePolicy
         && Objects.equals(retryParameters, that.retryParameters)
         && Objects.equals(cronSchedule, that.cronSchedule)
         && Objects.equals(memo, that.memo)
-        && Objects.equals(searchAttributes, that.searchAttributes);
+        && Objects.equals(searchAttributes, that.searchAttributes)
+        && Objects.equals(context, that.context)
+        && Objects.equals(delayStart, that.delayStart);
   }
 
   @Override
@@ -422,12 +428,13 @@ public final class StartWorkflowExecutionParameters {
             taskList,
             executionStartToCloseTimeoutSeconds,
             taskStartToCloseTimeoutSeconds,
-            childPolicy,
             workflowIdReusePolicy,
             retryParameters,
             cronSchedule,
             memo,
-            searchAttributes);
+            searchAttributes,
+            context,
+            delayStart);
     result = 31 * result + Arrays.hashCode(input);
     return result;
   }

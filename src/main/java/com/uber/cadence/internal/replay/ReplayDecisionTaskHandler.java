@@ -113,7 +113,7 @@ public final class ReplayDecisionTaskHandler implements DecisionTaskHandler {
       e.printStackTrace(pw);
       String stackTrace = sw.toString();
       failedRequest.setDetails(stackTrace.getBytes(StandardCharsets.UTF_8));
-      return new DecisionTaskHandler.Result(null, failedRequest, null, null);
+      return new DecisionTaskHandler.Result(null, failedRequest, null);
     }
   }
 
@@ -236,7 +236,7 @@ public final class ReplayDecisionTaskHandler implements DecisionTaskHandler {
         cache.markProcessingDone(decisionTask);
       }
     }
-    return new Result(null, null, queryCompletedRequest, null);
+    return new Result(null, null, queryCompletedRequest);
   }
 
   private Result createCompletedRequest(
@@ -245,6 +245,7 @@ public final class ReplayDecisionTaskHandler implements DecisionTaskHandler {
         new RespondDecisionTaskCompletedRequest();
     completedRequest.setTaskToken(decisionTask.getTaskToken());
     completedRequest.setDecisions(result.getDecisions());
+    completedRequest.setQueryResults(result.getQueryResults());
     completedRequest.setForceCreateNewDecisionTask(result.getForceCreateNewDecisionTask());
 
     if (stickyTaskListName != null) {
@@ -254,7 +255,7 @@ public final class ReplayDecisionTaskHandler implements DecisionTaskHandler {
           (int) stickyTaskListScheduleToStartTimeout.getSeconds());
       completedRequest.setStickyAttributes(attributes);
     }
-    return new Result(completedRequest, null, null, null);
+    return new Result(completedRequest, null, null);
   }
 
   @Override
@@ -276,8 +277,9 @@ public final class ReplayDecisionTaskHandler implements DecisionTaskHandler {
       decisionTask.setHistory(getHistoryResponse.getHistory());
       decisionTask.setNextPageToken(getHistoryResponse.getNextPageToken());
     }
-    DecisionsHelper decisionsHelper = new DecisionsHelper(decisionTask);
+    DecisionsHelper decisionsHelper = new DecisionsHelper(decisionTask, options);
     ReplayWorkflow workflow = workflowFactory.getWorkflow(workflowType);
-    return new ReplayDecider(service, domain, workflow, decisionsHelper, options, laTaskPoller);
+    return new ReplayDecider(
+        service, domain, workflowType, workflow, decisionsHelper, options, laTaskPoller);
   }
 }

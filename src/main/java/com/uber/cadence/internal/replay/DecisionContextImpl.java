@@ -17,16 +17,19 @@
 
 package com.uber.cadence.internal.replay;
 
-import com.uber.cadence.ChildPolicy;
 import com.uber.cadence.DecisionTaskFailedCause;
 import com.uber.cadence.DecisionTaskFailedEventAttributes;
 import com.uber.cadence.HistoryEvent;
 import com.uber.cadence.PollForDecisionTaskResponse;
+import com.uber.cadence.SearchAttributes;
 import com.uber.cadence.TimerFiredEventAttributes;
+import com.uber.cadence.UpsertWorkflowSearchAttributesEventAttributes;
 import com.uber.cadence.WorkflowExecution;
 import com.uber.cadence.WorkflowExecutionStartedEventAttributes;
 import com.uber.cadence.WorkflowType;
+import com.uber.cadence.context.ContextPropagator;
 import com.uber.cadence.converter.DataConverter;
+import com.uber.cadence.internal.common.InternalUtils;
 import com.uber.cadence.internal.metrics.ReplayAwareScope;
 import com.uber.cadence.internal.worker.LocalActivityWorker;
 import com.uber.cadence.internal.worker.SingleWorkerOptions;
@@ -36,6 +39,8 @@ import com.uber.cadence.workflow.Promise;
 import com.uber.cadence.workflow.Workflow;
 import com.uber.m3.tally.Scope;
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
@@ -65,7 +70,9 @@ final class DecisionContextImpl implements DecisionContext, HistoryEventHandler 
       BiFunction<LocalActivityWorker.Task, Duration, Boolean> laTaskPoller,
       ReplayDecider replayDecider) {
     this.activityClient = new ActivityDecisionContext(decisionsHelper);
-    this.workflowContext = new WorkflowContext(domain, decisionTask, startedAttributes);
+    this.workflowContext =
+        new WorkflowContext(
+            domain, decisionTask, startedAttributes, options.getContextPropagators());
     this.workflowClient = new WorkflowDecisionContext(decisionsHelper, workflowContext);
     this.workflowClock =
         new ClockDecisionContext(
@@ -98,6 +105,11 @@ final class DecisionContextImpl implements DecisionContext, HistoryEventHandler 
   @Override
   public WorkflowExecution getWorkflowExecution() {
     return workflowContext.getWorkflowExecution();
+  }
+
+  @Override
+  public WorkflowExecution getParentWorkflowExecution() {
+    return workflowContext.getParentWorkflowExecution();
   }
 
   @Override
@@ -136,11 +148,6 @@ final class DecisionContextImpl implements DecisionContext, HistoryEventHandler 
   }
 
   @Override
-  public ChildPolicy getChildPolicy() {
-    return workflowContext.getChildPolicy();
-  }
-
-  @Override
   public String getTaskList() {
     return workflowContext.getTaskList();
   }
@@ -163,6 +170,21 @@ final class DecisionContextImpl implements DecisionContext, HistoryEventHandler 
   @Override
   public Duration getExecutionStartToCloseTimeout() {
     return Duration.ofSeconds(workflowContext.getExecutionStartToCloseTimeoutSeconds());
+  }
+
+  @Override
+  public SearchAttributes getSearchAttributes() {
+    return workflowContext.getSearchAttributes();
+  }
+
+  @Override
+  public List<ContextPropagator> getContextPropagators() {
+    return workflowContext.getContextPropagators();
+  }
+
+  @Override
+  public Map<String, Object> getPropagatedContexts() {
+    return workflowContext.getPropagatedContexts();
   }
 
   @Override
@@ -256,7 +278,14 @@ final class DecisionContextImpl implements DecisionContext, HistoryEventHandler 
   @Override
   public int getVersion(
       String changeID, DataConverter converter, int minSupported, int maxSupported) {
-    return workflowClock.getVersion(changeID, converter, minSupported, maxSupported);
+    final ClockDecisionContext.GetVersionResult results =
+        workflowClock.getVersion(changeID, converter, minSupported, maxSupported);
+    if (results.shouldUpdateCadenceChangeVersion()) {
+      upsertSearchAttributes(
+          InternalUtils.convertMapToSearchAttributes(
+              results.getSearchAttributesForChangeVersion()));
+    }
+    return results.getVersion();
   }
 
   @Override
@@ -367,5 +396,21 @@ final class DecisionContextImpl implements DecisionContext, HistoryEventHandler 
 
   void awaitTaskCompletion(Duration duration) throws InterruptedException {
     workflowClock.awaitTaskCompletion(duration);
+  }
+
+  @Override
+  public void upsertSearchAttributes(SearchAttributes searchAttributes) {
+    workflowClock.upsertSearchAttributes(searchAttributes);
+    workflowContext.mergeSearchAttributes(searchAttributes);
+  }
+
+  @Override
+  public void handleUpsertSearchAttributes(HistoryEvent event) {
+    UpsertWorkflowSearchAttributesEventAttributes attr =
+        event.getUpsertWorkflowSearchAttributesEventAttributes();
+    if (attr != null) {
+      SearchAttributes searchAttributes = attr.getSearchAttributes();
+      workflowContext.mergeSearchAttributes(searchAttributes);
+    }
   }
 }

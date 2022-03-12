@@ -3,27 +3,34 @@ version: '3.5'
 services:
   cassandra:
     image: cassandra:3.11
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 12000M
     ports:
       - "9042:9042"
-    networks:
-      services-network:
-        aliases:
-          - cassandra
 
   statsd:
     image: hopsoft/graphite-statsd
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 1024M
     ports:
       - "8080:80"
       - "2003:2003"
       - "8125:8125"
       - "8126:8126"
-    networks:
-      services-network:
-        aliases:
-          - statsd
 
   cadence:
     image: ubercadence/server:master-auto-setup
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 8192M
     ports:
       - "7933:7933"
       - "7934:7934"
@@ -35,16 +42,17 @@ services:
     depends_on:
       - cassandra
       - statsd
-    networks:
-      services-network:
-        aliases:
-          - cadence
 
   unit-test-docker-sticky-off:
     build:
       context: ../../
       dockerfile: ./docker/buildkite/Dockerfile
-    command: "./gradlew test"
+    command: "./gradlew --no-daemon test"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 8192M
     environment:
       - "USER=unittest"
       - "CADENCE_SEEDS=cadence"
@@ -54,16 +62,17 @@ services:
       - cadence
     volumes:
       - "../../:/cadence-java-client"
-    networks:
-      services-network:
-        aliases:
-          - unit-test-docker-sticky-off
 
   unit-test-docker-sticky-on:
     build:
       context: ../../
       dockerfile: ./docker/buildkite/Dockerfile
-    command: "./gradlew test"
+    command: "./gradlew --no-daemon test"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 8192M
     environment:
       - "USER=unittest"
       - "CADENCE_SEEDS=cadence"
@@ -73,27 +82,44 @@ services:
       - cadence
     volumes:
       - "../../:/cadence-java-client"
-    networks:
-      services-network:
-        aliases:
-          - unit-test-docker-sticky-on
 
   unit-test-test-service:
     build:
       context: ../../
       dockerfile: ./docker/buildkite/Dockerfile
-    command: "./gradlew test"
+    command: "./gradlew --no-daemon test"
     environment:
       - "USER=unittest"
       - "USE_DOCKER_SERVICE=false"
     volumes:
       - "../../:/cadence-java-client"
-    networks:
-      services-network:
-        aliases:
-          - unit-test-test-service
 
-networks:
-  services-network:
-    name: services-network
-    driver: bridge
+  test-coverage-report:
+    build:
+      context: ../../
+      dockerfile: ./docker/buildkite/Dockerfile
+    command: "./gradlew --no-daemon test"
+    environment:
+      - "USER=unittest"
+      - "USE_DOCKER_SERVICE=false"
+      - CI
+      - BUILDKITE
+      - BUILDKITE_AGENT_ACCESS_TOKEN
+      - BUILDKITE_JOB_ID
+      - BUILDKITE_BUILD_ID
+      - BUILDKITE_BUILD_NUMBER
+      - BUILDKITE_BRANCH
+      - BUILDKITE_BUILD_URL
+      - BUILDKITE_PROJECT_SLUG
+      - BUILDKITE_COMMIT
+      - BUILDKITE_PULL_REQUEST
+      - BUILDKITE_TAG
+      - BUILDKITE_REPO
+      - BUILDKITE_BUILD_CREATOR
+      - BUILDKITE_BUILD_CREATOR_EMAIL
+      - BUILDKITE_BUILD_CREATOR_TEAMS
+      - BUILDKITE_PULL_REQUEST_REPO
+      - COVERALLS_REPO_TOKEN
+    volumes:
+      - "../../:/cadence-java-client"
+      - /usr/bin/buildkite-agent:/usr/bin/buildkite-agent

@@ -24,6 +24,7 @@ import static org.mockito.Mockito.*;
 
 import com.uber.cadence.activity.ActivityOptions;
 import com.uber.cadence.client.WorkflowClient;
+import com.uber.cadence.client.WorkflowClientOptions;
 import com.uber.cadence.client.WorkflowOptions;
 import com.uber.cadence.common.RetryOptions;
 import com.uber.cadence.internal.metrics.MetricsTag;
@@ -195,11 +196,13 @@ public class MetricsTest {
     reporter = mock(StatsReporter.class);
     Scope scope = new RootScopeBuilder().reporter(reporter).reportEvery(reportingFrequecy);
 
-    TestEnvironmentOptions testOptions =
-        new TestEnvironmentOptions.Builder()
+    WorkflowClientOptions clientOptions =
+        WorkflowClientOptions.newBuilder()
             .setDomain(WorkflowTest.DOMAIN)
             .setMetricsScope(scope)
             .build();
+    TestEnvironmentOptions testOptions =
+        new TestEnvironmentOptions.Builder().setWorkflowClientOptions(clientOptions).build();
     testEnvironment = TestWorkflowEnvironment.newInstance(testOptions);
   }
 
@@ -252,6 +255,7 @@ public class MetricsTest {
             .put(MetricsTag.DOMAIN, WorkflowTest.DOMAIN)
             .put(MetricsTag.TASK_LIST, taskList)
             .put(MetricsTag.ACTIVITY_TYPE, "TestActivity::runActivity")
+            .put(MetricsTag.WORKFLOW_TYPE, "TestWorkflow::execute")
             .build();
     verify(reporter, times(1))
         .reportCounter("cadence-activity-task-completed", activityCompletionTags, 1);

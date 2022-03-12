@@ -17,9 +17,79 @@
 
 package com.uber.cadence.serviceclient;
 
+import com.uber.cadence.GetWorkflowExecutionHistoryRequest;
+import com.uber.cadence.GetWorkflowExecutionHistoryResponse;
+import com.uber.cadence.SignalWorkflowExecutionRequest;
+import com.uber.cadence.StartWorkflowExecutionRequest;
 import com.uber.cadence.WorkflowService.AsyncIface;
 import com.uber.cadence.WorkflowService.Iface;
+import java.util.concurrent.CompletableFuture;
+import org.apache.thrift.TException;
+import org.apache.thrift.async.AsyncMethodCallback;
 
 public interface IWorkflowService extends Iface, AsyncIface {
   void close();
+
+  /**
+   * StartWorkflowExecutionWithTimeout start workflow same as StartWorkflowExecution but with
+   * timeout
+   *
+   * @param startRequest
+   * @param resultHandler
+   * @param timeoutInMillis
+   * @throws TException
+   */
+  void StartWorkflowExecutionWithTimeout(
+      StartWorkflowExecutionRequest startRequest,
+      AsyncMethodCallback resultHandler,
+      Long timeoutInMillis)
+      throws TException;
+
+  /**
+   * GetWorkflowExecutionHistoryWithTimeout get workflow history same as GetWorkflowExecutionHistory
+   * but with timeout.
+   *
+   * @param getRequest
+   * @param timeoutInMillis
+   * @return GetWorkflowExecutionHistoryResponse
+   * @throws TException
+   */
+  GetWorkflowExecutionHistoryResponse GetWorkflowExecutionHistoryWithTimeout(
+      GetWorkflowExecutionHistoryRequest getRequest, Long timeoutInMillis) throws TException;
+
+  /**
+   * GetWorkflowExecutionHistoryWithTimeout get workflow history asynchronously same as
+   * GetWorkflowExecutionHistory but with timeout.
+   *
+   * @param getRequest
+   * @param resultHandler
+   * @param timeoutInMillis
+   * @throws org.apache.thrift.TException
+   */
+  void GetWorkflowExecutionHistoryWithTimeout(
+      GetWorkflowExecutionHistoryRequest getRequest,
+      AsyncMethodCallback resultHandler,
+      Long timeoutInMillis)
+      throws TException;
+
+  /**
+   * SignalWorkflowExecutionWithTimeout signal workflow same as SignalWorkflowExecution but with
+   * timeout
+   *
+   * @param signalRequest
+   * @param resultHandler
+   * @param timeoutInMillis
+   * @throws TException
+   */
+  void SignalWorkflowExecutionWithTimeout(
+      SignalWorkflowExecutionRequest signalRequest,
+      AsyncMethodCallback resultHandler,
+      Long timeoutInMillis)
+      throws TException;
+
+  /**
+   * Checks if we have a valid connection to the Cadence cluster, and potentially resets the peer
+   * list
+   */
+  CompletableFuture<Boolean> isHealthy();
 }

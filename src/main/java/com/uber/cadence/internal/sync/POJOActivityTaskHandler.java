@@ -19,6 +19,7 @@ package com.uber.cadence.internal.sync;
 
 import com.google.common.base.Joiner;
 import com.google.common.reflect.TypeToken;
+import com.google.common.util.concurrent.RateLimiter;
 import com.uber.cadence.PollForActivityTaskResponse;
 import com.uber.cadence.RespondActivityTaskCompletedRequest;
 import com.uber.cadence.RespondActivityTaskFailedRequest;
@@ -43,6 +44,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiFunction;
 
 class POJOActivityTaskHandler implements ActivityTaskHandler {
+  private static final RateLimiter metricsRateLimiter = RateLimiter.create(1);
 
   private final DataConverter dataConverter;
   private final ScheduledExecutorService heartbeatExecutor;
@@ -147,8 +149,7 @@ class POJOActivityTaskHandler implements ActivityTaskHandler {
     failure = CheckedExceptionWrapper.unwrap(failure);
     result.setReason(failure.getClass().getName());
     result.setDetails(dataConverter.toData(failure));
-    return new ActivityTaskHandler.Result(
-        null, new Result.TaskFailedResult(result, failure), null, null);
+    return new ActivityTaskHandler.Result(null, new Result.TaskFailedResult(result, failure), null);
   }
 
   @Override
@@ -187,6 +188,15 @@ class POJOActivityTaskHandler implements ActivityTaskHandler {
           metricsScope,
           isLocalActivity);
     }
+    if (metricsRateLimiter.tryAcquire(1)) {
+      if (isLocalActivity) {
+        metricsScope
+            .gauge(MetricsType.LOCAL_ACTIVITY_ACTIVE_THREAD_COUNT)
+            .update(Thread.activeCount());
+      } else {
+        metricsScope.gauge(MetricsType.ACTIVITY_ACTIVE_THREAD_COUNT).update(Thread.activeCount());
+      }
+    }
     return activity.execute(activityTask, metricsScope);
   }
 
@@ -214,12 +224,12 @@ class POJOActivityTaskHandler implements ActivityTaskHandler {
         Object result = method.invoke(activity, args);
         RespondActivityTaskCompletedRequest request = new RespondActivityTaskCompletedRequest();
         if (context.isDoNotCompleteOnReturn()) {
-          return new ActivityTaskHandler.Result(null, null, null, null);
+          return new ActivityTaskHandler.Result(null, null, null);
         }
         if (method.getReturnType() != Void.TYPE) {
           request.setResult(dataConverter.toData(result));
         }
-        return new ActivityTaskHandler.Result(request, null, null, null);
+        return new ActivityTaskHandler.Result(request, null, null);
       } catch (RuntimeException | IllegalAccessException e) {
         return mapToActivityFailure(e, metricsScope, false);
       } catch (InvocationTargetException e) {
@@ -252,7 +262,7 @@ class POJOActivityTaskHandler implements ActivityTaskHandler {
         if (method.getReturnType() != Void.TYPE) {
           request.setResult(dataConverter.toData(result));
         }
-        return new ActivityTaskHandler.Result(request, null, null, null);
+        return new ActivityTaskHandler.Result(request, null, null);
       } catch (RuntimeException | IllegalAccessException e) {
         return mapToActivityFailure(e, metricsScope, true);
       } catch (InvocationTargetException e) {

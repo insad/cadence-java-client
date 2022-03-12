@@ -17,10 +17,12 @@
 
 package com.uber.cadence.internal.sync;
 
+import static com.uber.cadence.internal.errors.ErrorType.UNKNOWN_WORKFLOW_TYPE;
 import static com.uber.cadence.worker.NonDeterministicWorkflowPolicy.FailWorkflow;
 
 import com.google.common.reflect.TypeToken;
 import com.uber.cadence.WorkflowType;
+import com.uber.cadence.context.ContextPropagator;
 import com.uber.cadence.converter.DataConverter;
 import com.uber.cadence.converter.DataConverterException;
 import com.uber.cadence.internal.common.CheckedExceptionWrapper;
@@ -44,6 +46,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
@@ -60,6 +63,7 @@ final class POJOWorkflowImplementationFactory implements ReplayWorkflowFactory {
   private final Function<WorkflowInterceptor, WorkflowInterceptor> interceptorFactory;
 
   private DataConverter dataConverter;
+  private List<ContextPropagator> contextPropagators;
 
   /** Key: workflow type name, Value: function that creates SyncWorkflowDefinition instance. */
   private final Map<String, Functions.Func<SyncWorkflowDefinition>> workflowDefinitions =
@@ -78,11 +82,13 @@ final class POJOWorkflowImplementationFactory implements ReplayWorkflowFactory {
       DataConverter dataConverter,
       ExecutorService threadPool,
       Function<WorkflowInterceptor, WorkflowInterceptor> interceptorFactory,
-      DeciderCache cache) {
+      DeciderCache cache,
+      List<ContextPropagator> contextPropagators) {
     this.dataConverter = Objects.requireNonNull(dataConverter);
     this.threadPool = Objects.requireNonNull(threadPool);
     this.interceptorFactory = Objects.requireNonNull(interceptorFactory);
     this.cache = cache;
+    this.contextPropagators = contextPropagators;
   }
 
   void setWorkflowImplementationTypes(
@@ -182,7 +188,8 @@ final class POJOWorkflowImplementationFactory implements ReplayWorkflowFactory {
     if (factory == null) {
       // throw Error to abort decision, not fail the workflow
       throw new Error(
-          "Unknown workflow type \""
+          UNKNOWN_WORKFLOW_TYPE
+              + " \""
               + workflowType.getName()
               + "\". Known types are "
               + workflowDefinitions.keySet());
@@ -203,7 +210,13 @@ final class POJOWorkflowImplementationFactory implements ReplayWorkflowFactory {
     SyncWorkflowDefinition workflow = getWorkflowDefinition(workflowType);
     WorkflowImplementationOptions options = implementationOptions.get(workflowType.getName());
     return new SyncWorkflow(
-        workflow, options, dataConverter, threadPool, interceptorFactory, cache);
+        workflow,
+        options,
+        dataConverter,
+        threadPool,
+        interceptorFactory,
+        cache,
+        contextPropagators);
   }
 
   @Override
@@ -311,7 +324,10 @@ final class POJOWorkflowImplementationFactory implements ReplayWorkflowFactory {
         newInstance();
         signalMethod.invoke(workflow, args);
       } catch (IllegalAccessException e) {
-        throw new Error("Failure processing \"" + signalName + "\" at eventID " + eventId, e);
+        String errorMessage =
+            "Failed to process signal \"" + signalName + "\" at eventID " + eventId + ".";
+        log.error(errorMessage + "\n" + e);
+        throw new Error(errorMessage + " Check cause for details.", e);
       } catch (DataConverterException e) {
         logSerializationException(signalName, eventId, e);
       } catch (InvocationTargetException e) {
@@ -321,8 +337,10 @@ final class POJOWorkflowImplementationFactory implements ReplayWorkflowFactory {
         } else if (targetException instanceof Error) {
           throw (Error) targetException;
         } else {
-          throw new Error(
-              "Failure processing \"" + signalName + "\" at eventID " + eventId, targetException);
+          String errorMessage =
+              "Failed to process signal \"" + signalName + "\" at eventID " + eventId + ".";
+          log.error(errorMessage + "\n" + targetException);
+          throw new Error(errorMessage + " Check cause for details.", targetException);
         }
       }
     }

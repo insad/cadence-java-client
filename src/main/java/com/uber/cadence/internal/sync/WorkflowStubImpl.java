@@ -19,25 +19,20 @@ package com.uber.cadence.internal.sync;
 
 import com.uber.cadence.EntityNotExistsError;
 import com.uber.cadence.InternalServiceError;
+import com.uber.cadence.QueryConsistencyLevel;
 import com.uber.cadence.QueryFailedError;
 import com.uber.cadence.QueryRejectCondition;
 import com.uber.cadence.QueryWorkflowResponse;
 import com.uber.cadence.WorkflowExecution;
+import com.uber.cadence.WorkflowExecutionAlreadyCompletedError;
 import com.uber.cadence.WorkflowExecutionAlreadyStartedError;
 import com.uber.cadence.WorkflowType;
-import com.uber.cadence.client.DuplicateWorkflowException;
-import com.uber.cadence.client.WorkflowException;
-import com.uber.cadence.client.WorkflowFailureException;
-import com.uber.cadence.client.WorkflowNotFoundException;
-import com.uber.cadence.client.WorkflowOptions;
-import com.uber.cadence.client.WorkflowQueryException;
-import com.uber.cadence.client.WorkflowServiceException;
-import com.uber.cadence.client.WorkflowStub;
+import com.uber.cadence.client.*;
+import com.uber.cadence.context.ContextPropagator;
 import com.uber.cadence.converter.DataConverter;
 import com.uber.cadence.converter.DataConverterException;
 import com.uber.cadence.converter.JsonDataConverter;
 import com.uber.cadence.internal.common.CheckedExceptionWrapper;
-import com.uber.cadence.internal.common.QueryResponse;
 import com.uber.cadence.internal.common.SignalWithStartWorkflowExecutionParameters;
 import com.uber.cadence.internal.common.StartWorkflowExecutionParameters;
 import com.uber.cadence.internal.common.WorkflowExecutionFailedException;
@@ -47,6 +42,7 @@ import com.uber.cadence.internal.replay.QueryWorkflowParameters;
 import com.uber.cadence.internal.replay.SignalExternalWorkflowParameters;
 import java.lang.reflect.Type;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -64,14 +60,16 @@ class WorkflowStubImpl implements WorkflowStub {
   private final Optional<String> workflowType;
   private AtomicReference<WorkflowExecution> execution = new AtomicReference<>();
   private final Optional<WorkflowOptions> options;
+  private final WorkflowClientOptions clientOptions;
 
   WorkflowStubImpl(
+      WorkflowClientOptions clientOptions,
       GenericWorkflowClientExternal genericClient,
-      DataConverter dataConverter,
       Optional<String> workflowType,
       WorkflowExecution execution) {
+    this.clientOptions = clientOptions;
     this.genericClient = genericClient;
-    this.dataConverter = dataConverter;
+    this.dataConverter = clientOptions.getDataConverter();
     this.workflowType = workflowType;
     if (execution == null
         || execution.getWorkflowId() == null
@@ -83,18 +81,41 @@ class WorkflowStubImpl implements WorkflowStub {
   }
 
   WorkflowStubImpl(
+      WorkflowClientOptions clientOptions,
       GenericWorkflowClientExternal genericClient,
-      DataConverter dataConverter,
       String workflowType,
       WorkflowOptions options) {
+    this.clientOptions = clientOptions;
     this.genericClient = genericClient;
-    this.dataConverter = dataConverter;
+    this.dataConverter = clientOptions.getDataConverter();
     this.workflowType = Optional.of(workflowType);
     this.options = Optional.of(options);
   }
 
   @Override
   public void signal(String signalName, Object... input) {
+    SignalExternalWorkflowParameters p = getSignalExternalWorkflowParameters(signalName, input);
+    try {
+      genericClient.signalWorkflowExecution(p);
+    } catch (Exception e) {
+      throw new WorkflowServiceException(execution.get(), workflowType, e);
+    }
+  }
+
+  @Override
+  public CompletableFuture<Void> signalAsync(String signalName, Object... input) {
+    return signalAsyncWithTimeout(Long.MAX_VALUE, TimeUnit.MILLISECONDS, signalName, input);
+  }
+
+  @Override
+  public CompletableFuture<Void> signalAsyncWithTimeout(
+      long timeout, TimeUnit unit, String signalName, Object... input) {
+    SignalExternalWorkflowParameters p = getSignalExternalWorkflowParameters(signalName, input);
+    return genericClient.signalWorkflowExecutionAsync(p, unit.toMillis(timeout));
+  }
+
+  private SignalExternalWorkflowParameters getSignalExternalWorkflowParameters(
+      String signalName, Object... input) {
     checkStarted();
     SignalExternalWorkflowParameters p = new SignalExternalWorkflowParameters();
     p.setInput(dataConverter.toData(input));
@@ -103,11 +124,7 @@ class WorkflowStubImpl implements WorkflowStub {
     // TODO: Deal with signaling started workflow only, when requested
     // Commented out to support signaling workflows that called continue as new.
     //        p.setRunId(execution.getRunId());
-    try {
-      genericClient.signalWorkflowExecution(p);
-    } catch (Exception e) {
-      throw new WorkflowServiceException(execution.get(), workflowType, e);
-    }
+    return p;
   }
 
   private WorkflowExecution startWithOptions(WorkflowOptions o, Object... args) {
@@ -124,6 +141,12 @@ class WorkflowStubImpl implements WorkflowStub {
       throw new WorkflowServiceException(execution.get(), workflowType, e);
     }
     return execution.get();
+  }
+
+  private CompletableFuture<WorkflowExecution> startAsyncWithOptions(
+      long timeout, TimeUnit unit, WorkflowOptions o, Object... args) {
+    StartWorkflowExecutionParameters p = getStartWorkflowExecutionParameters(o, args);
+    return genericClient.startWorkflowAsync(p, unit.toMillis(timeout));
   }
 
   private StartWorkflowExecutionParameters getStartWorkflowExecutionParameters(
@@ -145,6 +168,8 @@ class WorkflowStubImpl implements WorkflowStub {
     p.setWorkflowType(new WorkflowType().setName(workflowType.get()));
     p.setMemo(convertMemoFromObjectToBytes(o.getMemo()));
     p.setSearchAttributes(convertSearchAttributesFromObjectToBytes(o.getSearchAttributes()));
+    p.setContext(extractContextsAndConvertToBytes(o.getContextPropagators()));
+    p.setDelayStart(o.getDelayStart());
     return p;
   }
 
@@ -172,12 +197,50 @@ class WorkflowStubImpl implements WorkflowStub {
     return convertMapFromObjectToBytes(map, JsonDataConverter.getInstance());
   }
 
+  private Map<String, byte[]> extractContextsAndConvertToBytes(
+      List<ContextPropagator> contextPropagators) {
+    if (contextPropagators == null || contextPropagators.isEmpty()) {
+      return null;
+    }
+    Map<String, byte[]> result = new HashMap<>();
+    for (ContextPropagator propagator : contextPropagators) {
+      result.putAll(propagator.serializeContext(propagator.getCurrentContext()));
+    }
+    return result;
+  }
+
   @Override
   public WorkflowExecution start(Object... args) {
     if (!options.isPresent()) {
       throw new IllegalStateException("Required parameter WorkflowOptions is missing");
     }
     return startWithOptions(WorkflowOptions.merge(null, null, null, options.get()), args);
+  }
+
+  @Override
+  public CompletableFuture<WorkflowExecution> startAsync(Object... args) {
+    return startAsyncWithTimeout(Long.MAX_VALUE, TimeUnit.MILLISECONDS, args);
+  }
+
+  @Override
+  public CompletableFuture<WorkflowExecution> startAsyncWithTimeout(
+      long timeout, TimeUnit unit, Object... args) {
+    if (!options.isPresent()) {
+      throw new IllegalStateException("Required parameter WorkflowOptions is missing");
+    }
+
+    CompletableFuture<WorkflowExecution> result =
+        startAsyncWithOptions(
+            timeout, unit, WorkflowOptions.merge(null, null, null, options.get()), args);
+    return result.whenComplete(
+        (input, exception) -> {
+          if (input != null) {
+            execution.set(
+                new WorkflowExecution()
+                    .setWorkflowId(input.getWorkflowId())
+                    .setRunId(input.getRunId()));
+          }
+        });
   }
 
   private WorkflowExecution signalWithStartWithOptions(
@@ -330,6 +393,9 @@ class WorkflowStubImpl implements WorkflowStub {
           execution.get(), workflowType, executionFailed.getDecisionTaskCompletedEventId(), cause);
     } else if (failure instanceof EntityNotExistsError) {
       throw new WorkflowNotFoundException(execution.get(), workflowType, failure.getMessage());
+    } else if (failure instanceof WorkflowExecutionAlreadyCompletedError) {
+      throw new WorkflowAlreadyCompletedException(
+          execution.get(), workflowType, failure.getMessage());
     } else if (failure instanceof CancellationException) {
       throw (CancellationException) failure;
     } else if (failure instanceof WorkflowException) {
@@ -341,16 +407,17 @@ class WorkflowStubImpl implements WorkflowStub {
 
   @Override
   public <R> R query(String queryType, Class<R> resultClass, Object... args) {
-    return query(queryType, resultClass, resultClass, args);
+    return queryWithOptions(
+        queryType, new QueryOptions.Builder().build(), resultClass, resultClass, args);
   }
 
   @Override
   public <R> R query(String queryType, Class<R> resultClass, Type resultType, Object... args) {
-    return query(queryType, resultClass, resultType, null, args).getResult();
+    return query(queryType, resultClass, resultType, clientOptions.getQueryRejectCondition(), args);
   }
 
   @Override
-  public <R> QueryResponse<R> query(
+  public <R> R query(
       String queryType,
       Class<R> resultClass,
       QueryRejectCondition queryRejectCondition,
@@ -359,27 +426,41 @@ class WorkflowStubImpl implements WorkflowStub {
   }
 
   @Override
-  public <R> QueryResponse<R> query(
+  public <R> R query(
       String queryType,
       Class<R> resultClass,
       Type resultType,
       QueryRejectCondition queryRejectCondition,
+      Object... args) {
+    return queryWithOptions(
+        queryType,
+        new QueryOptions.Builder()
+            .setQueryRejectCondition(queryRejectCondition)
+            .setQueryConsistencyLevel(QueryConsistencyLevel.EVENTUAL)
+            .build(),
+        resultType,
+        resultClass,
+        args);
+  }
+
+  @Override
+  public <R> R queryWithOptions(
+      String queryType,
+      QueryOptions options,
+      Type resultType,
+      Class<R> resultClass,
       Object... args) {
     checkStarted();
     QueryWorkflowParameters p = new QueryWorkflowParameters();
     p.setInput(dataConverter.toData(args));
     p.setQueryType(queryType);
     p.setWorkflowId(execution.get().getWorkflowId());
-    p.setQueryRejectCondition(queryRejectCondition);
-    try {
-      QueryWorkflowResponse result = genericClient.queryWorkflow(p);
-      if (result.queryRejected == null) {
-        return new QueryResponse<>(
-            null, dataConverter.fromData(result.getQueryResult(), resultClass, resultType));
-      } else {
-        return new QueryResponse<>(result.getQueryRejected(), null);
-      }
+    p.setQueryRejectCondition(options.getQueryRejectCondition());
+    p.setQueryConsistencyLevel(options.getQueryConsistencyLevel());
 
+    QueryWorkflowResponse result;
+    try {
+      result = genericClient.queryWorkflow(p);
     } catch (RuntimeException e) {
       Exception unwrapped = CheckedExceptionWrapper.unwrap(e);
       if (unwrapped instanceof EntityNotExistsError) {
@@ -392,6 +473,15 @@ class WorkflowStubImpl implements WorkflowStub {
         throw new WorkflowServiceException(execution.get(), workflowType, unwrapped);
       }
       throw e;
+    }
+
+    if (result.queryRejected == null) {
+      return dataConverter.fromData(result.getQueryResult(), resultClass, resultType);
+    } else {
+      throw new WorkflowQueryRejectedException(
+          execution.get(),
+          options.getQueryRejectCondition(),
+          result.getQueryRejected().getCloseStatus());
     }
   }
 

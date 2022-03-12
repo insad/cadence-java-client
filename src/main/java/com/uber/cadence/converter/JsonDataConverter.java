@@ -36,7 +36,7 @@ import org.apache.thrift.protocol.TJSONProtocol;
 
 /**
  * Implements conversion through GSON JSON processor. To extend use {@link
- * JsonDataConverter(Function)} constructor. Thrift structures are converted using {@link
+ * #JsonDataConverter(Function)} constructor. Thrift structures are converted using {@link
  * TJSONProtocol}. When using thrift only one argument of a method is expected.
  *
  * @author fateev
@@ -49,7 +49,6 @@ public final class JsonDataConverter implements DataConverter {
   private static final String JSON_CONVERTER_TYPE = "JSON";
   private static final String CLASS_NAME_FIELD_NAME = "className";
   private final Gson gson;
-  private final JsonParser parser = new JsonParser();
 
   public static DataConverter getInstance() {
     return INSTANCE;
@@ -128,7 +127,7 @@ public final class JsonDataConverter implements DataConverter {
         return new Object[] {result};
       }
 
-      JsonElement element = parser.parse(new String(content, StandardCharsets.UTF_8));
+      JsonElement element = JsonParser.parseString(new String(content, StandardCharsets.UTF_8));
       JsonArray array;
       if (element instanceof JsonArray) {
         array = element.getAsJsonArray();

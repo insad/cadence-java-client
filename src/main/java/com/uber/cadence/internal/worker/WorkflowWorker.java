@@ -18,47 +18,47 @@
 package com.uber.cadence.internal.worker;
 
 import com.google.common.base.Strings;
-import com.uber.cadence.BadRequestError;
-import com.uber.cadence.DomainNotActiveError;
-import com.uber.cadence.EntityNotExistsError;
+import com.uber.cadence.ActivityLocalDispatchInfo;
+import com.uber.cadence.Decision;
 import com.uber.cadence.GetWorkflowExecutionHistoryResponse;
 import com.uber.cadence.History;
 import com.uber.cadence.HistoryEvent;
 import com.uber.cadence.PollForDecisionTaskResponse;
 import com.uber.cadence.RespondDecisionTaskCompletedRequest;
+import com.uber.cadence.RespondDecisionTaskCompletedResponse;
 import com.uber.cadence.RespondDecisionTaskFailedRequest;
 import com.uber.cadence.RespondQueryTaskCompletedRequest;
+import com.uber.cadence.ScheduleActivityTaskDecisionAttributes;
 import com.uber.cadence.WorkflowExecution;
 import com.uber.cadence.WorkflowExecutionStartedEventAttributes;
 import com.uber.cadence.WorkflowQuery;
 import com.uber.cadence.WorkflowType;
-import com.uber.cadence.common.RetryOptions;
+import com.uber.cadence.common.BinaryChecksum;
 import com.uber.cadence.common.WorkflowExecutionHistory;
-import com.uber.cadence.internal.common.Retryer;
+import com.uber.cadence.internal.common.RpcRetryer;
 import com.uber.cadence.internal.common.WorkflowExecutionUtils;
 import com.uber.cadence.internal.logging.LoggerTag;
 import com.uber.cadence.internal.metrics.MetricsTag;
 import com.uber.cadence.internal.metrics.MetricsType;
+import com.uber.cadence.internal.worker.LocallyDispatchedActivityWorker.Task;
 import com.uber.cadence.serviceclient.IWorkflowService;
 import com.uber.m3.tally.Scope;
 import com.uber.m3.tally.Stopwatch;
 import com.uber.m3.util.ImmutableMap;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import org.apache.thrift.TException;
 import org.slf4j.MDC;
 
-public final class WorkflowWorker
-    implements SuspendableWorker, Consumer<PollForDecisionTaskResponse> {
+public final class WorkflowWorker extends SuspendableWorkerBase
+    implements Consumer<PollForDecisionTaskResponse> {
 
   private static final String POLL_THREAD_NAME_PREFIX = "Workflow Poller taskList=";
-
-  private SuspendableWorker poller = new NoopSuspendableWorker();
-  private PollTaskExecutor<PollForDecisionTaskResponse> pollTaskExecutor;
   private final DecisionTaskHandler handler;
   private final IWorkflowService service;
   private final String domain;
@@ -66,6 +66,8 @@ public final class WorkflowWorker
   private final SingleWorkerOptions options;
   private final String stickyTaskListName;
   private final WorkflowRunLockManager runLocks = new WorkflowRunLockManager();
+  private final Function<Task, Boolean> ldaTaskPoller;
+  private PollTaskExecutor<PollForDecisionTaskResponse> pollTaskExecutor;
 
   public WorkflowWorker(
       IWorkflowService service,
@@ -73,22 +75,24 @@ public final class WorkflowWorker
       String taskList,
       SingleWorkerOptions options,
       DecisionTaskHandler handler,
+      Function<Task, Boolean> ldaTaskPoller,
       String stickyTaskListName) {
     this.service = Objects.requireNonNull(service);
     this.domain = Objects.requireNonNull(domain);
     this.taskList = Objects.requireNonNull(taskList);
     this.handler = handler;
+    this.ldaTaskPoller = ldaTaskPoller;
     this.stickyTaskListName = stickyTaskListName;
 
     PollerOptions pollerOptions = options.getPollerOptions();
     if (pollerOptions.getPollThreadNamePrefix() == null) {
       pollerOptions =
-          new PollerOptions.Builder(pollerOptions)
+          PollerOptions.newBuilder(pollerOptions)
               .setPollThreadNamePrefix(
                   POLL_THREAD_NAME_PREFIX + "\"" + taskList + "\", domain=\"" + domain + "\"")
               .build();
     }
-    this.options = new SingleWorkerOptions.Builder(options).setPollerOptions(pollerOptions).build();
+    this.options = SingleWorkerOptions.newBuilder(options).setPollerOptions(pollerOptions).build();
   }
 
   @Override
@@ -96,7 +100,7 @@ public final class WorkflowWorker
     if (handler.isAnyTypeSupported()) {
       pollTaskExecutor =
           new PollTaskExecutor<>(domain, taskList, options, new TaskHandlerImpl(handler));
-      poller =
+      SuspendableWorker poller =
           new Poller<>(
               options.getIdentity(),
               new WorkflowPollTask(
@@ -105,23 +109,9 @@ public final class WorkflowWorker
               options.getPollerOptions(),
               options.getMetricsScope());
       poller.start();
+      setPoller(poller);
       options.getMetricsScope().counter(MetricsType.WORKER_START_COUNTER).inc(1);
     }
-  }
-
-  @Override
-  public boolean isStarted() {
-    return poller.isStarted();
-  }
-
-  @Override
-  public boolean isShutdown() {
-    return poller.isShutdown();
-  }
-
-  @Override
-  public boolean isTerminated() {
-    return poller.isTerminated();
   }
 
   public byte[] queryWorkflowExecution(WorkflowExecution exec, String queryType, byte[] args)
@@ -149,8 +139,7 @@ public final class WorkflowWorker
   private byte[] queryWorkflowExecution(
       String queryType, byte[] args, WorkflowExecutionHistory history, byte[] nextPageToken)
       throws Exception {
-    PollForDecisionTaskResponse task;
-    task = new PollForDecisionTaskResponse();
+    PollForDecisionTaskResponse task = new PollForDecisionTaskResponse();
     task.setWorkflowExecution(history.getWorkflowExecution());
     task.setStartedEventId(Long.MAX_VALUE);
     task.setPreviousStartedEventId(Long.MAX_VALUE);
@@ -164,7 +153,7 @@ public final class WorkflowWorker
         startedEvent.getWorkflowExecutionStartedEventAttributes();
     if (started == null) {
       throw new IllegalStateException(
-          "First event of the history is not  WorkflowExecutionStarted: " + startedEvent);
+          "First event of the history is not WorkflowExecutionStarted: " + startedEvent);
     }
     WorkflowType workflowType = started.getWorkflowType();
     task.setWorkflowType(workflowType);
@@ -186,40 +175,6 @@ public final class WorkflowWorker
       return r.getQueryResult();
     }
     throw new RuntimeException("Query returned wrong response: " + result);
-  }
-
-  @Override
-  public void shutdown() {
-    poller.shutdown();
-  }
-
-  @Override
-  public void shutdownNow() {
-    poller.shutdownNow();
-  }
-
-  @Override
-  public void awaitTermination(long timeout, TimeUnit unit) {
-    if (!poller.isStarted()) {
-      return;
-    }
-
-    poller.awaitTermination(timeout, unit);
-  }
-
-  @Override
-  public void suspendPolling() {
-    poller.suspendPolling();
-  }
-
-  @Override
-  public void resumePolling() {
-    poller.resumePolling();
-  }
-
-  @Override
-  public boolean isSuspended() {
-    return poller.isSuspended();
   }
 
   @Override
@@ -259,7 +214,7 @@ public final class WorkflowWorker
         sw.stop();
 
         sw = metricsScope.timer(MetricsType.DECISION_RESPONSE_LATENCY).start();
-        sendReply(service, task.getTaskToken(), response);
+        sendReply(service, task, response);
         sw.stop();
 
         metricsScope.counter(MetricsType.DECISION_TASK_COMPLETED_COUNTER).inc(1);
@@ -286,38 +241,94 @@ public final class WorkflowWorker
     }
 
     private void sendReply(
-        IWorkflowService service, byte[] taskToken, DecisionTaskHandler.Result response)
+        IWorkflowService service,
+        PollForDecisionTaskResponse task,
+        DecisionTaskHandler.Result response)
         throws TException {
-      RetryOptions ro = response.getRequestRetryOptions();
       RespondDecisionTaskCompletedRequest taskCompleted = response.getTaskCompleted();
       if (taskCompleted != null) {
-        ro =
-            options
-                .getReportCompletionRetryOptions()
-                .merge(ro)
-                .addDoNotRetry(
-                    BadRequestError.class, EntityNotExistsError.class, DomainNotActiveError.class);
         taskCompleted.setIdentity(options.getIdentity());
-        taskCompleted.setTaskToken(taskToken);
-        Retryer.retry(ro, () -> service.RespondDecisionTaskCompleted(taskCompleted));
+        taskCompleted.setTaskToken(task.getTaskToken());
+        taskCompleted.setBinaryChecksum(BinaryChecksum.getBinaryChecksum());
+        RpcRetryer.retry(
+            () -> {
+              RespondDecisionTaskCompletedResponse taskCompletedResponse = null;
+              List<Task> activityTasks = new ArrayList<>();
+              try {
+                if (ldaTaskPoller != null) {
+                  for (Decision decision : taskCompleted.getDecisions()) {
+                    ScheduleActivityTaskDecisionAttributes attr =
+                        decision.getScheduleActivityTaskDecisionAttributes();
+                    if (attr != null && taskList.equals(attr.getTaskList().getName())) {
+                      // assume the activity type is in registry otherwise the activity would be
+                      // failed and retried from server
+                      Task activityTask =
+                          new Task(
+                              attr.getActivityId(),
+                              attr.getActivityType(),
+                              attr.bufferForInput(),
+                              attr.getScheduleToCloseTimeoutSeconds(),
+                              attr.getStartToCloseTimeoutSeconds(),
+                              attr.getHeartbeatTimeoutSeconds(),
+                              task.getWorkflowType(),
+                              domain,
+                              attr.getHeader(),
+                              task.getWorkflowExecution());
+                      if (ldaTaskPoller.apply(activityTask)) {
+                        options
+                            .getMetricsScope()
+                            .counter(MetricsType.ACTIVITY_LOCAL_DISPATCH_SUCCEED_COUNTER)
+                            .inc(1);
+                        decision
+                            .getScheduleActivityTaskDecisionAttributes()
+                            .setRequestLocalDispatch(true);
+                        activityTasks.add(activityTask);
+                      } else {
+                        // all pollers are busy - no room to optimize
+                        options
+                            .getMetricsScope()
+                            .counter(MetricsType.ACTIVITY_LOCAL_DISPATCH_FAILED_COUNTER)
+                            .inc(1);
+                      }
+                    }
+                  }
+                }
+                taskCompletedResponse = service.RespondDecisionTaskCompleted(taskCompleted);
+              } finally {
+                for (Task activityTask : activityTasks) {
+                  boolean started = false;
+                  if (taskCompletedResponse != null
+                      && taskCompletedResponse.getActivitiesToDispatchLocally() != null) {
+                    ActivityLocalDispatchInfo activityLocalDispatchInfo =
+                        taskCompletedResponse
+                            .getActivitiesToDispatchLocally()
+                            .getOrDefault(activityTask.activityId, null);
+                    if (activityLocalDispatchInfo != null) {
+                      activityTask.scheduledTimestamp =
+                          activityLocalDispatchInfo.getScheduledTimestamp();
+                      activityTask.startedTimestamp =
+                          activityLocalDispatchInfo.getStartedTimestamp();
+                      activityTask.scheduledTimestampOfThisAttempt =
+                          activityLocalDispatchInfo.getScheduledTimestampOfThisAttempt();
+                      activityTask.taskToken = activityLocalDispatchInfo.bufferForTaskToken();
+                      started = true;
+                    }
+                  }
+                  activityTask.notify(started);
+                }
+              }
+            });
       } else {
         RespondDecisionTaskFailedRequest taskFailed = response.getTaskFailed();
         if (taskFailed != null) {
-          ro =
-              options
-                  .getReportFailureRetryOptions()
-                  .merge(ro)
-                  .addDoNotRetry(
-                      BadRequestError.class,
-                      EntityNotExistsError.class,
-                      DomainNotActiveError.class);
           taskFailed.setIdentity(options.getIdentity());
-          taskFailed.setTaskToken(taskToken);
-          Retryer.retry(ro, () -> service.RespondDecisionTaskFailed(taskFailed));
+          taskFailed.setTaskToken(task.getTaskToken());
+          taskFailed.setBinaryChecksum(BinaryChecksum.getBinaryChecksum());
+          RpcRetryer.retry(() -> service.RespondDecisionTaskFailed(taskFailed));
         } else {
           RespondQueryTaskCompletedRequest queryCompleted = response.getQueryCompleted();
           if (queryCompleted != null) {
-            queryCompleted.setTaskToken(taskToken);
+            queryCompleted.setTaskToken(task.getTaskToken());
             // Do not retry query response.
             service.RespondQueryTaskCompleted(queryCompleted);
           }

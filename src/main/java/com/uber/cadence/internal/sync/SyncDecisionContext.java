@@ -18,14 +18,18 @@
 package com.uber.cadence.internal.sync;
 
 import static com.uber.cadence.internal.common.OptionsUtils.roundUpToSeconds;
+import static com.uber.cadence.internal.sync.WorkflowInternal.CADENCE_CHANGE_VERSION;
 
 import com.uber.cadence.ActivityType;
+import com.uber.cadence.SearchAttributes;
 import com.uber.cadence.WorkflowExecution;
 import com.uber.cadence.WorkflowType;
 import com.uber.cadence.activity.ActivityOptions;
 import com.uber.cadence.activity.LocalActivityOptions;
 import com.uber.cadence.common.RetryOptions;
+import com.uber.cadence.context.ContextPropagator;
 import com.uber.cadence.converter.DataConverter;
+import com.uber.cadence.internal.common.InternalUtils;
 import com.uber.cadence.internal.common.RetryParameters;
 import com.uber.cadence.internal.replay.ActivityTaskFailedException;
 import com.uber.cadence.internal.replay.ActivityTaskTimeoutException;
@@ -56,6 +60,7 @@ import com.uber.m3.tally.Scope;
 import java.lang.reflect.Type;
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -78,6 +83,7 @@ final class SyncDecisionContext implements WorkflowInterceptor {
   private final DecisionContext context;
   private DeterministicRunner runner;
   private final DataConverter converter;
+  private final List<ContextPropagator> contextPropagators;
   private final WorkflowInterceptor headInterceptor;
   private final WorkflowTimers timers = new WorkflowTimers();
   private final Map<String, Functions.Func1<byte[], byte[]>> queryCallbacks = new HashMap<>();
@@ -86,10 +92,12 @@ final class SyncDecisionContext implements WorkflowInterceptor {
   public SyncDecisionContext(
       DecisionContext context,
       DataConverter converter,
+      List<ContextPropagator> contextPropagators,
       Function<WorkflowInterceptor, WorkflowInterceptor> interceptorFactory,
       byte[] lastCompletionResult) {
     this.context = context;
     this.converter = converter;
+    this.contextPropagators = contextPropagators;
     WorkflowInterceptor interceptor = interceptorFactory.apply(this);
     if (interceptor == null) {
       log.warn("WorkflowInterceptor factory returned null interceptor");
@@ -302,22 +310,39 @@ final class SyncDecisionContext implements WorkflowInterceptor {
     if (retryOptions != null) {
       parameters.setRetryParameters(new RetryParameters(retryOptions));
     }
+
+    // Set the context value.  Use the context propagators from the ActivityOptions
+    // if present, otherwise use the ones configured on the DecisionContext
+    List<ContextPropagator> propagators = options.getContextPropagators();
+    if (propagators == null) {
+      propagators = this.contextPropagators;
+    }
+    parameters.setContext(extractContextsAndConvertToBytes(propagators));
+
     return parameters;
   }
 
   private ExecuteLocalActivityParameters constructExecuteLocalActivityParameters(
       String name, LocalActivityOptions options, byte[] input, long elapsed, int attempt) {
-    ExecuteLocalActivityParameters parameters = new ExecuteLocalActivityParameters();
-    parameters
-        .withActivityType(new ActivityType().setName(name))
-        .withInput(input)
-        .withScheduleToCloseTimeoutSeconds(options.getScheduleToCloseTimeout().getSeconds());
+    ExecuteLocalActivityParameters parameters =
+        new ExecuteLocalActivityParameters()
+            .withActivityType(new ActivityType().setName(name))
+            .withInput(input)
+            .withScheduleToCloseTimeoutSeconds(options.getScheduleToCloseTimeout().getSeconds());
+
     RetryOptions retryOptions = options.getRetryOptions();
     if (retryOptions != null) {
       parameters.setRetryOptions(retryOptions);
     }
     parameters.setAttempt(attempt);
     parameters.setElapsedTime(elapsed);
+    parameters.setWorkflowDomain(this.context.getDomain());
+    parameters.setWorkflowExecution(this.context.getWorkflowExecution());
+
+    List<ContextPropagator> propagators =
+        Optional.ofNullable(options.getContextPropagators()).orElse(contextPropagators);
+    parameters.setContext(extractContextsAndConvertToBytes(propagators));
+
     return parameters;
   }
 
@@ -351,7 +376,9 @@ final class SyncDecisionContext implements WorkflowInterceptor {
               .setTaskStartToCloseTimeout(options.getTaskStartToCloseTimeout())
               .setWorkflowId(options.getWorkflowId())
               .setWorkflowIdReusePolicy(options.getWorkflowIdReusePolicy())
-              .setChildPolicy(options.getChildPolicy())
+              .setMemo(options.getMemo())
+              .setSearchAttributes(options.getSearchAttributes())
+              .setParentClosePolicy(options.getParentClosePolicy())
               .build();
       return WorkflowRetryerInternal.retryAsync(
           retryOptions, () -> executeChildWorkflowOnce(name, o1, input, executionResult));
@@ -370,12 +397,16 @@ final class SyncDecisionContext implements WorkflowInterceptor {
     if (retryOptions != null) {
       retryParameters = new RetryParameters(retryOptions);
     }
+    List<ContextPropagator> propagators = options.getContextPropagators();
+    if (propagators == null) {
+      propagators = this.contextPropagators;
+    }
+
     StartChildWorkflowExecutionParameters parameters =
         new StartChildWorkflowExecutionParameters.Builder()
             .setWorkflowType(new WorkflowType().setName(name))
             .setWorkflowId(options.getWorkflowId())
             .setInput(input)
-            .setChildPolicy(options.getChildPolicy())
             .setExecutionStartToCloseTimeoutSeconds(
                 options.getExecutionStartToCloseTimeout().getSeconds())
             .setDomain(options.getDomain())
@@ -384,12 +415,18 @@ final class SyncDecisionContext implements WorkflowInterceptor {
             .setWorkflowIdReusePolicy(options.getWorkflowIdReusePolicy())
             .setRetryParameters(retryParameters)
             .setCronSchedule(options.getCronSchedule())
+            .setMemo(options.getMemo())
+            .setSearchAttributes(options.getSearchAttributes())
+            .setContext(extractContextsAndConvertToBytes(propagators))
+            .setParentClosePolicy(options.getParentClosePolicy())
             .build();
     CompletablePromise<byte[]> result = Workflow.newPromise();
     Consumer<Exception> cancellationCallback =
         context.startChildWorkflow(
             parameters,
-            executionResult::complete,
+            (we) ->
+                runner.executeInWorkflowThread(
+                    "child workflow completion callback", () -> executionResult.complete(we)),
             (output, failure) -> {
               if (failure != null) {
                 runner.executeInWorkflowThread(
@@ -407,6 +444,18 @@ final class SyncDecisionContext implements WorkflowInterceptor {
               cancellationCallback.accept(new CancellationException(reason));
               return null;
             });
+    return result;
+  }
+
+  private Map<String, byte[]> extractContextsAndConvertToBytes(
+      List<ContextPropagator> contextPropagators) {
+    if (contextPropagators == null) {
+      return null;
+    }
+    Map<String, byte[]> result = new HashMap<>();
+    for (ContextPropagator propagator : contextPropagators) {
+      result.putAll(propagator.serializeContext(propagator.getCurrentContext()));
+    }
     return result;
   }
 
@@ -692,5 +741,20 @@ final class SyncDecisionContext implements WorkflowInterceptor {
 
     DataConverter dataConverter = getDataConverter();
     return dataConverter.fromData(lastCompletionResult, resultClass, resultType);
+  }
+
+  @Override
+  public void upsertSearchAttributes(Map<String, Object> searchAttributes) {
+    if (searchAttributes.isEmpty()) {
+      throw new IllegalArgumentException("Empty search attributes");
+    }
+
+    if (searchAttributes.containsKey(CADENCE_CHANGE_VERSION)) {
+      throw new IllegalArgumentException(
+          "CadenceChangeVersion is a reserved key that cannot be set, please use other key");
+    }
+
+    SearchAttributes attr = InternalUtils.convertMapToSearchAttributes(searchAttributes);
+    context.upsertSearchAttributes(attr);
   }
 }

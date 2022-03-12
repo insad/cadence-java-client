@@ -17,11 +17,12 @@
 
 package com.uber.cadence.internal.replay;
 
-import com.uber.cadence.ChildPolicy;
+import com.uber.cadence.ParentClosePolicy;
 import com.uber.cadence.WorkflowIdReusePolicy;
 import com.uber.cadence.WorkflowType;
 import com.uber.cadence.internal.common.RetryParameters;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Objects;
 
 public final class StartChildWorkflowExecutionParameters {
@@ -44,13 +45,19 @@ public final class StartChildWorkflowExecutionParameters {
 
     private WorkflowType workflowType;
 
-    private ChildPolicy childPolicy;
-
     private WorkflowIdReusePolicy workflowIdReusePolicy;
 
     private RetryParameters retryParameters;
 
     private String cronSchedule;
+
+    private Map<String, Object> memo;
+
+    private Map<String, Object> searchAttributes;
+
+    private Map<String, byte[]> context;
+
+    private ParentClosePolicy parentClosePolicy;
 
     public Builder setDomain(String domain) {
       this.domain = domain;
@@ -93,11 +100,6 @@ public final class StartChildWorkflowExecutionParameters {
       return this;
     }
 
-    public Builder setChildPolicy(ChildPolicy childPolicy) {
-      this.childPolicy = childPolicy;
-      return this;
-    }
-
     public Builder setWorkflowIdReusePolicy(WorkflowIdReusePolicy workflowIdReusePolicy) {
       this.workflowIdReusePolicy = workflowIdReusePolicy;
       return this;
@@ -113,6 +115,26 @@ public final class StartChildWorkflowExecutionParameters {
       return this;
     }
 
+    public Builder setMemo(Map<String, Object> memo) {
+      this.memo = memo;
+      return this;
+    }
+
+    public Builder setSearchAttributes(Map<String, Object> searchAttributes) {
+      this.searchAttributes = searchAttributes;
+      return this;
+    }
+
+    public Builder setContext(Map<String, byte[]> context) {
+      this.context = context;
+      return this;
+    }
+
+    public Builder setParentClosePolicy(ParentClosePolicy parentClosePolicy) {
+      this.parentClosePolicy = parentClosePolicy;
+      return this;
+    }
+
     public StartChildWorkflowExecutionParameters build() {
       return new StartChildWorkflowExecutionParameters(
           domain,
@@ -123,10 +145,13 @@ public final class StartChildWorkflowExecutionParameters {
           taskStartToCloseTimeoutSeconds,
           workflowId,
           workflowType,
-          childPolicy,
           workflowIdReusePolicy,
           retryParameters,
-          cronSchedule);
+          cronSchedule,
+          memo,
+          searchAttributes,
+          context,
+          parentClosePolicy);
     }
   }
 
@@ -146,13 +171,19 @@ public final class StartChildWorkflowExecutionParameters {
 
   private final WorkflowType workflowType;
 
-  private final ChildPolicy childPolicy;
-
   private final WorkflowIdReusePolicy workflowIdReusePolicy;
 
   private final RetryParameters retryParameters;
 
   private final String cronSchedule;
+
+  private Map<String, Object> memo;
+
+  private Map<String, Object> searchAttributes;
+
+  private Map<String, byte[]> context;
+
+  private final ParentClosePolicy parentClosePolicy;
 
   private StartChildWorkflowExecutionParameters(
       String domain,
@@ -163,10 +194,13 @@ public final class StartChildWorkflowExecutionParameters {
       long taskStartToCloseTimeoutSeconds,
       String workflowId,
       WorkflowType workflowType,
-      ChildPolicy childPolicy,
       WorkflowIdReusePolicy workflowIdReusePolicy,
       RetryParameters retryParameters,
-      String cronSchedule) {
+      String cronSchedule,
+      Map<String, Object> memo,
+      Map<String, Object> searchAttributes,
+      Map<String, byte[]> context,
+      ParentClosePolicy parentClosePolicy) {
     this.domain = domain;
     this.input = input;
     this.control = control;
@@ -175,10 +209,13 @@ public final class StartChildWorkflowExecutionParameters {
     this.taskStartToCloseTimeoutSeconds = taskStartToCloseTimeoutSeconds;
     this.workflowId = workflowId;
     this.workflowType = workflowType;
-    this.childPolicy = childPolicy;
     this.workflowIdReusePolicy = workflowIdReusePolicy;
     this.retryParameters = retryParameters;
     this.cronSchedule = cronSchedule;
+    this.memo = memo;
+    this.searchAttributes = searchAttributes;
+    this.context = context;
+    this.parentClosePolicy = parentClosePolicy;
   }
 
   public String getDomain() {
@@ -213,10 +250,6 @@ public final class StartChildWorkflowExecutionParameters {
     return workflowType;
   }
 
-  public ChildPolicy getChildPolicy() {
-    return childPolicy;
-  }
-
   public WorkflowIdReusePolicy getWorkflowIdReusePolicy() {
     return workflowIdReusePolicy;
   }
@@ -227,6 +260,22 @@ public final class StartChildWorkflowExecutionParameters {
 
   public String getCronSchedule() {
     return cronSchedule;
+  }
+
+  public Map<String, Object> getMemo() {
+    return memo;
+  }
+
+  public Map<String, Object> getSearchAttributes() {
+    return searchAttributes;
+  }
+
+  public Map<String, byte[]> getContext() {
+    return context;
+  }
+
+  public ParentClosePolicy getParentClosePolicy() {
+    return parentClosePolicy;
   }
 
   @Override
@@ -242,10 +291,13 @@ public final class StartChildWorkflowExecutionParameters {
         && Objects.equals(taskList, that.taskList)
         && Objects.equals(workflowId, that.workflowId)
         && Objects.equals(workflowType, that.workflowType)
-        && childPolicy == that.childPolicy
         && workflowIdReusePolicy == that.workflowIdReusePolicy
         && Objects.equals(retryParameters, that.retryParameters)
-        && Objects.equals(cronSchedule, that.cronSchedule);
+        && Objects.equals(cronSchedule, that.cronSchedule)
+        && Objects.equals(memo, that.memo)
+        && Objects.equals(searchAttributes, that.searchAttributes)
+        && Objects.equals(context, that.context)
+        && Objects.equals(parentClosePolicy, that.parentClosePolicy);
   }
 
   @Override
@@ -259,10 +311,13 @@ public final class StartChildWorkflowExecutionParameters {
             taskStartToCloseTimeoutSeconds,
             workflowId,
             workflowType,
-            childPolicy,
             workflowIdReusePolicy,
             retryParameters,
-            cronSchedule);
+            cronSchedule,
+            memo,
+            searchAttributes,
+            context,
+            parentClosePolicy);
     result = 31 * result + Arrays.hashCode(input);
     return result;
   }
@@ -290,14 +345,20 @@ public final class StartChildWorkflowExecutionParameters {
         + '\''
         + ", workflowType="
         + workflowType
-        + ", childPolicy="
-        + childPolicy
         + ", workflowIdReusePolicy="
         + workflowIdReusePolicy
         + ", retryParameters="
         + retryParameters
         + ", cronSchedule="
         + cronSchedule
+        + ", memo="
+        + memo
+        + ", searchAttributes="
+        + searchAttributes
+        + ", context='"
+        + context
+        + ", parentClosePolicy="
+        + parentClosePolicy
         + '}';
   }
 }

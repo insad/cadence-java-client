@@ -25,13 +25,17 @@ import com.uber.cadence.GetWorkflowExecutionHistoryResponse;
 import com.uber.cadence.History;
 import com.uber.cadence.HistoryEvent;
 import com.uber.cadence.PollForDecisionTaskResponse;
+import com.uber.cadence.QueryResultType;
 import com.uber.cadence.TimerFiredEventAttributes;
 import com.uber.cadence.WorkflowExecutionSignaledEventAttributes;
 import com.uber.cadence.WorkflowExecutionStartedEventAttributes;
 import com.uber.cadence.WorkflowQuery;
+import com.uber.cadence.WorkflowQueryResult;
+import com.uber.cadence.WorkflowType;
 import com.uber.cadence.common.RetryOptions;
 import com.uber.cadence.internal.common.OptionsUtils;
-import com.uber.cadence.internal.common.Retryer;
+import com.uber.cadence.internal.common.RpcRetryer;
+import com.uber.cadence.internal.metrics.MetricsTag;
 import com.uber.cadence.internal.metrics.MetricsType;
 import com.uber.cadence.internal.replay.HistoryHelper.DecisionEvents;
 import com.uber.cadence.internal.replay.HistoryHelper.DecisionEventsIterator;
@@ -43,23 +47,33 @@ import com.uber.cadence.serviceclient.IWorkflowService;
 import com.uber.cadence.workflow.Functions;
 import com.uber.m3.tally.Scope;
 import com.uber.m3.tally.Stopwatch;
+import com.uber.m3.util.ImmutableMap;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import org.apache.thrift.TException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Implements decider that relies on replay of a workflow code. An instance of this class is created
  * per decision.
  */
-class ReplayDecider implements Decider, Consumer<HistoryEvent> {
+class ReplayDecider implements Decider {
+
+  private static final Logger log = LoggerFactory.getLogger(ReplayDecider.class);
 
   private static final int MAXIMUM_PAGE_SIZE = 10000;
 
@@ -75,10 +89,13 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
   private final Scope metricsScope;
   private final long wfStartTimeNanos;
   private final WorkflowExecutionStartedEventAttributes startedEvent;
+  private final Lock lock = new ReentrantLock();
+  private final Consumer<HistoryEvent> localActivityCompletionSink;
 
   ReplayDecider(
       IWorkflowService service,
       String domain,
+      WorkflowType workflowType,
       ReplayWorkflow workflow,
       DecisionsHelper decisionsHelper,
       SingleWorkerOptions options,
@@ -86,7 +103,10 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
     this.service = service;
     this.workflow = workflow;
     this.decisionsHelper = decisionsHelper;
-    this.metricsScope = options.getMetricsScope();
+    this.metricsScope =
+        options
+            .getMetricsScope()
+            .tagged(ImmutableMap.of(MetricsTag.WORKFLOW_TYPE, workflowType.getName()));
     PollForDecisionTaskResponse decisionTask = decisionsHelper.getTask();
 
     startedEvent =
@@ -100,6 +120,19 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
     context =
         new DecisionContextImpl(
             decisionsHelper, domain, decisionTask, startedEvent, options, laTaskPoller, this);
+    localActivityCompletionSink =
+        historyEvent -> {
+          lock.lock();
+          try {
+            processEvent(historyEvent);
+          } finally {
+            lock.unlock();
+          }
+        };
+  }
+
+  Lock getLock() {
+    return lock;
   }
 
   private void handleWorkflowExecutionStarted(HistoryEvent event) {
@@ -229,7 +262,7 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
         context.handleDecisionTaskFailed(event);
         break;
       case UpsertWorkflowSearchAttributes:
-        // TODO: https://github.com/uber/cadence-java-client/issues/360
+        context.handleUpsertSearchAttributes(event);
         break;
     }
   }
@@ -356,8 +389,40 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
 
   @Override
   public DecisionResult decide(PollForDecisionTaskResponse decisionTask) throws Throwable {
-    boolean forceCreateNewDecisionTask = decideImpl(decisionTask, null);
-    return new DecisionResult(decisionsHelper.getDecisions(), forceCreateNewDecisionTask);
+    lock.lock();
+    try {
+      AtomicReference<Map<String, WorkflowQueryResult>> queryResults = new AtomicReference<>();
+      boolean forceCreateNewDecisionTask =
+          decideImpl(
+              decisionTask, () -> queryResults.set(getQueryResults(decisionTask.getQueries())));
+      return new DecisionResult(
+          decisionsHelper.getDecisions(), queryResults.get(), forceCreateNewDecisionTask);
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  private Map<String, WorkflowQueryResult> getQueryResults(Map<String, WorkflowQuery> queries) {
+    if (queries == null) {
+      return null;
+    }
+
+    return queries
+        .entrySet()
+        .stream()
+        .collect(Collectors.toMap(q -> q.getKey(), q -> queryWorkflow(q.getValue())));
+  }
+
+  private WorkflowQueryResult queryWorkflow(WorkflowQuery query) {
+    try {
+      return new WorkflowQueryResult()
+          .setResultType(QueryResultType.ANSWERED)
+          .setAnswer(workflow.query(query));
+    } catch (Throwable e) {
+      return new WorkflowQueryResult()
+          .setResultType(QueryResultType.FAILED)
+          .setErrorMessage(e.getMessage());
+    }
   }
 
   // Returns boolean to indicate whether we need to force create new decision task for local
@@ -425,7 +490,9 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
         // Reset state to before running the event loop
         decisionsHelper.handleDecisionTaskStartedEvent(decision);
       }
-
+      if (forceCreateNewDecisionTask) {
+        metricsScope.counter(MetricsType.DECISION_TASK_FORCE_COMPLETED).inc(1);
+      }
       return forceCreateNewDecisionTask;
     } catch (Error e) {
       if (this.workflow.getWorkflowImplementationOptions().getNonDeterministicWorkflowPolicy()
@@ -536,19 +603,28 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
 
   @Override
   public void close() {
-    workflow.close();
+    lock.lock();
+    try {
+      workflow.close();
+    } finally {
+      lock.unlock();
+    }
   }
 
   @Override
   public byte[] query(PollForDecisionTaskResponse response, WorkflowQuery query) throws Throwable {
-    AtomicReference<byte[]> result = new AtomicReference<>();
-    decideImpl(response, () -> result.set(workflow.query(query)));
-    return result.get();
+    lock.lock();
+    try {
+      AtomicReference<byte[]> result = new AtomicReference<>();
+      decideImpl(response, () -> result.set(workflow.query(query)));
+      return result.get();
+    } finally {
+      lock.unlock();
+    }
   }
 
-  @Override
-  public void accept(HistoryEvent event) {
-    processEvent(event);
+  public Consumer<HistoryEvent> getLocalActivityCompletionSink() {
+    return localActivityCompletionSink;
   }
 
   private class DecisionTaskWithHistoryIteratorImpl implements DecisionTaskWithHistoryIterator {
@@ -558,7 +634,7 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
     private final Duration paginationStart = Duration.ofMillis(System.currentTimeMillis());
     private Duration decisionTaskStartToCloseTimeout;
 
-    private final Duration retryServiceOperationExpirationInterval() {
+    private final Duration decisionTaskRemainingTime() {
       Duration passed = Duration.ofMillis(System.currentTimeMillis()).minus(paginationStart);
       return decisionTaskStartToCloseTimeout.minus(passed);
     }
@@ -580,7 +656,12 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
 
     @Override
     public PollForDecisionTaskResponse getDecisionTask() {
-      return task;
+      lock.lock();
+      try {
+        return task;
+      } finally {
+        lock.unlock();
+      }
     }
 
     @Override
@@ -597,11 +678,18 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
             return current.next();
           }
 
+          Duration decisionTaskRemainingTime = decisionTaskRemainingTime();
+          if (decisionTaskRemainingTime.isNegative() || decisionTaskRemainingTime.isZero()) {
+            throw new Error(
+                "Decision task timed out while querying history. If this happens consistently please consider "
+                    + "increase decision task timeout or reduce history size.");
+          }
+
           metricsScope.counter(MetricsType.WORKFLOW_GET_HISTORY_COUNTER).inc(1);
           Stopwatch sw = metricsScope.timer(MetricsType.WORKFLOW_GET_HISTORY_LATENCY).start();
           RetryOptions retryOptions =
               new RetryOptions.Builder()
-                  .setExpiration(retryServiceOperationExpirationInterval())
+                  .setExpiration(decisionTaskRemainingTime)
                   .setInitialInterval(retryServiceOperationInitialInterval)
                   .setMaximumInterval(retryServiceOperationMaxInterval)
                   .build();
@@ -615,7 +703,7 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
 
           try {
             GetWorkflowExecutionHistoryResponse r =
-                Retryer.retryWithResult(
+                RpcRetryer.retryWithResult(
                     retryOptions, () -> service.GetWorkflowExecutionHistory(request));
             current = r.getHistory().getEventsIterator();
             nextPageToken = r.getNextPageToken();
@@ -624,6 +712,19 @@ class ReplayDecider implements Decider, Consumer<HistoryEvent> {
           } catch (TException e) {
             metricsScope.counter(MetricsType.WORKFLOW_GET_HISTORY_FAILED_COUNTER).inc(1);
             throw new Error(e);
+          }
+          if (!current.hasNext()) {
+            log.error(
+                "GetWorkflowExecutionHistory returns an empty history, maybe a bug in server, workflowID:"
+                    + request.execution.workflowId
+                    + ", runID:"
+                    + request.execution.runId
+                    + ", domain:"
+                    + request.domain
+                    + " token:"
+                    + Arrays.toString(request.getNextPageToken()));
+            throw new Error(
+                "GetWorkflowExecutionHistory return empty history, maybe a bug in server");
           }
           return current.next();
         }

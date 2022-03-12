@@ -244,6 +244,8 @@ public class JsonDataConverterTest {
     }
   }
 
+  // TODO flaky test in local env: expected:<class java.lang.IllegalArgumentException> but
+  // was:<class java.lang.StackOverflowError>
   @Test
   public void testException() {
     RuntimeException rootException = new RuntimeException("root exception");
@@ -260,7 +262,7 @@ public class JsonDataConverterTest {
     assertNotNull(causeFromConverted);
     assertEquals(DataConverterException.class, causeFromConverted.getClass());
     assertNotNull(causeFromConverted.getCause());
-    assertEquals(StackOverflowError.class, causeFromConverted.getCause().getClass());
+    assertEquals(IllegalArgumentException.class, causeFromConverted.getCause().getClass());
 
     assertNotNull(causeFromConverted.getSuppressed());
     assertEquals(1, causeFromConverted.getSuppressed().length);

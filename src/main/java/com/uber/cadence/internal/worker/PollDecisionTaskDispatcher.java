@@ -76,11 +76,15 @@ public final class PollDecisionTaskDispatcher
 
       try {
         service.RespondDecisionTaskFailed(request);
-
       } catch (Exception e) {
         uncaughtExceptionHandler.uncaughtException(Thread.currentThread(), e);
       }
     }
+  }
+
+  @Override
+  public boolean hasCapacity() {
+    return true;
   }
 
   public void subscribe(String taskList, Consumer<PollForDecisionTaskResponse> consumer) {

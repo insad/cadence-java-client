@@ -25,14 +25,15 @@ import com.cronutils.model.definition.CronDefinition;
 import com.cronutils.model.definition.CronDefinitionBuilder;
 import com.cronutils.parser.CronParser;
 import com.google.common.base.Strings;
-import com.uber.cadence.ChildPolicy;
 import com.uber.cadence.WorkflowIdReusePolicy;
 import com.uber.cadence.common.CronSchedule;
 import com.uber.cadence.common.MethodRetry;
 import com.uber.cadence.common.RetryOptions;
+import com.uber.cadence.context.ContextPropagator;
 import com.uber.cadence.internal.common.OptionsUtils;
 import com.uber.cadence.workflow.WorkflowMethod;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -60,11 +61,12 @@ public final class WorkflowOptions {
             OptionsUtils.merge(
                 a.executionStartToCloseTimeoutSeconds(), o.getExecutionStartToCloseTimeout()))
         .setTaskList(OptionsUtils.merge(a.taskList(), o.getTaskList(), String.class))
-        .setChildPolicy(o.getChildPolicy())
         .setRetryOptions(RetryOptions.merge(methodRetry, o.getRetryOptions()))
         .setCronSchedule(OptionsUtils.merge(cronAnnotation, o.getCronSchedule(), String.class))
         .setMemo(o.getMemo())
         .setSearchAttributes(o.getSearchAttributes())
+        .setContextPropagators(o.getContextPropagators())
+        .setDelayStart(o.delayStart)
         .validateBuildWithDefaults();
   }
 
@@ -80,8 +82,6 @@ public final class WorkflowOptions {
 
     private String taskList;
 
-    private ChildPolicy childPolicy;
-
     private RetryOptions retryOptions;
 
     private String cronSchedule;
@@ -89,6 +89,10 @@ public final class WorkflowOptions {
     private Map<String, Object> memo;
 
     private Map<String, Object> searchAttributes;
+
+    private List<ContextPropagator> contextPropagators;
+
+    private Duration delayStart;
 
     public Builder() {}
 
@@ -101,11 +105,12 @@ public final class WorkflowOptions {
       this.taskStartToCloseTimeout = o.taskStartToCloseTimeout;
       this.executionStartToCloseTimeout = o.executionStartToCloseTimeout;
       this.taskList = o.taskList;
-      this.childPolicy = o.childPolicy;
       this.retryOptions = o.retryOptions;
       this.cronSchedule = o.cronSchedule;
       this.memo = o.memo;
       this.searchAttributes = o.searchAttributes;
+      this.contextPropagators = o.contextPropagators;
+      this.delayStart = o.delayStart;
     }
 
     /**
@@ -135,6 +140,11 @@ public final class WorkflowOptions {
      *
      * <ul>
      *   RejectDuplicate doesn't allow new run independently of the previous run closure status.
+     * </ul>
+     *
+     * <ul>
+     *   TerminateIfRunning terminate current running workflow using the same workflow ID if exist,
+     *   then start a new run in one transaction
      * </ul>
      */
     public Builder setWorkflowIdReusePolicy(WorkflowIdReusePolicy workflowIdReusePolicy) {
@@ -174,12 +184,6 @@ public final class WorkflowOptions {
       return this;
     }
 
-    /** Specifies how children of this workflow react to this workflow death. */
-    public Builder setChildPolicy(ChildPolicy childPolicy) {
-      this.childPolicy = childPolicy;
-      return this;
-    }
-
     public Builder setRetryOptions(RetryOptions retryOptions) {
       this.retryOptions = retryOptions;
       return this;
@@ -208,6 +212,17 @@ public final class WorkflowOptions {
       return this;
     }
 
+    /** Specifies the list of context propagators to use during this workflow. */
+    public Builder setContextPropagators(List<ContextPropagator> contextPropagators) {
+      this.contextPropagators = contextPropagators;
+      return this;
+    }
+
+    public Builder setDelayStart(Duration delayStart) {
+      this.delayStart = delayStart;
+      return this;
+    }
+
     public WorkflowOptions build() {
       return new WorkflowOptions(
           workflowId,
@@ -215,11 +230,12 @@ public final class WorkflowOptions {
           executionStartToCloseTimeout,
           taskStartToCloseTimeout,
           taskList,
-          childPolicy,
           retryOptions,
           cronSchedule,
           memo,
-          searchAttributes);
+          searchAttributes,
+          contextPropagators,
+          delayStart);
     }
 
     /**
@@ -255,6 +271,13 @@ public final class WorkflowOptions {
         cron.validate();
       }
 
+      if (delayStart != null) {
+        if (delayStart.getSeconds() < 0) {
+          throw new IllegalArgumentException(
+              "Delay start (in seconds) value cannot be lower than zero");
+        }
+      }
+
       return new WorkflowOptions(
           workflowId,
           policy,
@@ -262,11 +285,12 @@ public final class WorkflowOptions {
           roundUpToSeconds(
               taskStartToCloseTimeout, OptionsUtils.DEFAULT_TASK_START_TO_CLOSE_TIMEOUT),
           taskList,
-          childPolicy,
           retryOptions,
           cronSchedule,
           memo,
-          searchAttributes);
+          searchAttributes,
+          contextPropagators,
+          delayStart);
     }
   }
 
@@ -280,8 +304,6 @@ public final class WorkflowOptions {
 
   private final String taskList;
 
-  private final ChildPolicy childPolicy;
-
   private RetryOptions retryOptions;
 
   private String cronSchedule;
@@ -290,27 +312,33 @@ public final class WorkflowOptions {
 
   private Map<String, Object> searchAttributes;
 
+  private List<ContextPropagator> contextPropagators;
+
+  private Duration delayStart;
+
   private WorkflowOptions(
       String workflowId,
       WorkflowIdReusePolicy workflowIdReusePolicy,
       Duration executionStartToCloseTimeout,
       Duration taskStartToCloseTimeout,
       String taskList,
-      ChildPolicy childPolicy,
       RetryOptions retryOptions,
       String cronSchedule,
       Map<String, Object> memo,
-      Map<String, Object> searchAttributes) {
+      Map<String, Object> searchAttributes,
+      List<ContextPropagator> contextPropagators,
+      Duration delayStart) {
     this.workflowId = workflowId;
     this.workflowIdReusePolicy = workflowIdReusePolicy;
     this.executionStartToCloseTimeout = executionStartToCloseTimeout;
     this.taskStartToCloseTimeout = taskStartToCloseTimeout;
     this.taskList = taskList;
-    this.childPolicy = childPolicy;
     this.retryOptions = retryOptions;
     this.cronSchedule = cronSchedule;
     this.memo = memo;
     this.searchAttributes = searchAttributes;
+    this.contextPropagators = contextPropagators;
+    this.delayStart = delayStart;
   }
 
   public String getWorkflowId() {
@@ -333,10 +361,6 @@ public final class WorkflowOptions {
     return taskList;
   }
 
-  public ChildPolicy getChildPolicy() {
-    return childPolicy;
-  }
-
   public RetryOptions getRetryOptions() {
     return retryOptions;
   }
@@ -353,6 +377,14 @@ public final class WorkflowOptions {
     return searchAttributes;
   }
 
+  public List<ContextPropagator> getContextPropagators() {
+    return contextPropagators;
+  }
+
+  public Duration getDelayStart() {
+    return delayStart;
+  }
+
   @Override
   public boolean equals(Object o) {
     if (this == o) return true;
@@ -363,11 +395,12 @@ public final class WorkflowOptions {
         && Objects.equals(executionStartToCloseTimeout, that.executionStartToCloseTimeout)
         && Objects.equals(taskStartToCloseTimeout, that.taskStartToCloseTimeout)
         && Objects.equals(taskList, that.taskList)
-        && childPolicy == that.childPolicy
         && Objects.equals(retryOptions, that.retryOptions)
         && Objects.equals(cronSchedule, that.cronSchedule)
         && Objects.equals(memo, that.memo)
-        && Objects.equals(searchAttributes, that.searchAttributes);
+        && Objects.equals(searchAttributes, that.searchAttributes)
+        && Objects.equals(contextPropagators, that.contextPropagators)
+        && Objects.equals(delayStart, that.delayStart);
   }
 
   @Override
@@ -378,11 +411,12 @@ public final class WorkflowOptions {
         executionStartToCloseTimeout,
         taskStartToCloseTimeout,
         taskList,
-        childPolicy,
         retryOptions,
         cronSchedule,
         memo,
-        searchAttributes);
+        searchAttributes,
+        contextPropagators,
+        delayStart);
   }
 
   @Override
@@ -400,8 +434,6 @@ public final class WorkflowOptions {
         + ", taskList='"
         + taskList
         + '\''
-        + ", childPolicy="
-        + childPolicy
         + ", retryOptions="
         + retryOptions
         + ", cronSchedule='"
@@ -412,6 +444,11 @@ public final class WorkflowOptions {
         + '\''
         + ", searchAttributes='"
         + searchAttributes
+        + ", contextPropagators='"
+        + contextPropagators
+        + '\''
+        + ", delayStart='"
+        + delayStart
         + '\''
         + '}';
   }

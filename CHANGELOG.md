@@ -1,5 +1,137 @@
 # Changelog
 
+## 3.6.1
+### Changed
+- Fix a bug for PollOnlyIfExecutorHasCapacity flag about pool size.
+
+## 3.6.0
+### Added
+- Introduce experimental flag and add logic for capacity based polling.
+
+## 3.5.1
+### Added
+- Add CadenceChangeVersion support.
+- Allow using other tags in metric reporter.
+- Add metric tag to differentiate long-poll and normal request.
+### Changed 
+- Fix identity for sticky worker.
+- Improve contributing guide.
+
+## 3.5.0
+### Changed 
+- Fix consistent query interface which caused overloading ambiguity with variable argument
+
+## 3.4.0
+### Added
+- Support delay start for cron workflows
+- Add memo and search attributes to child workflow
+
+## 3.3.0
+### Added
+- Added feature flags to ship breaking chgit loganges without impacting old behavior.
+
+## 3.2.0
+### Added
+- Add Health check API to worker and service interface.
+### Changed
+- Replace sticky tasklist metrics scope with the same value.
+
+## 3.1.0
+### Added
+- [New feature] Workflow Shadowing worker and tests. The new shadowing feature provides:
+1. WorkflowShadower to run integration tests to replay workflow traffic from local/test environment.
+2. ShadowingWorker to run worker
+- [Breaking changes] Introduce new error type WorkflowAlreadyCompletedError in APIs SignalWorkflowExecution, CancelWorkflowExecution and TerminateWorkflowExecution.
+- Add Java 11 support.
+- Add binary checksum support.
+- Add activity worker thread count metrics.
+### Changed
+- Add all missing version marker before upsert searchattributes.
+
+## 3.0.0
+### Added
+- [New feature] Activity Local Dispatch: Allows Cadence worker to dispatch activity tasks through local tunnel after ScheduleActivity decisions are made. This is a performance optimization to reduce activity scheduling efforts.
+- Pass TaskListActivitiesPerSecond to activity worker and remove the limit.
+- Add missing workflowtype and activitytype metric tags.
+### Changed
+- [Breaking changes] Refactoring in Worker initialization path:
+  - Worker.Factory -> WorkerFactory
+  - Worker.FactoryOptions -> WorkerFactoryOptions
+  - PollerOptions.Builder -> PollerOptions.newBuilder
+  - SingleWorkerOptions.Builder -> SingleWorkerOptions.newBuilder
+  - Added WorkerOptions Builder
+  - WorkflowClient.newInstance(IWorkflowService, Domain, WorkflowClientOptions) -> WorkflowClient.newInstance(IWorkflowService, WorkflowClientOptions)
+  - WorkflowClientOptions.Builder -> WorkflowClientOptions.newBuilder
+  - Testing framework
+- Fix activity end-to-end latency metric.
+- Fix newProxyInstance with the correct class.
+- Fix bug in worker.isSuspended().
+- Improve worker start/shutdown logic.
+- Improve retry logic.
+- Fix race condition during serialization.
+
+## 2.7.8
+- Fix get raw history
+- Improve signal processing error and log
+- Fix replay error when querying workflow that contains activity retry
+
+## 2.7.6
+- Fix getVersion override when added new version
+- Add async signal to untypedstub
+- Fix RetryOptions.addDoNotRetry
+- Add missing metrics from go client
+- Fix a bug in setting retry expiration while getting history
+- Fix start async return
+
+## 2.7.5
+- Added supports contextPropagators for localActivity
+
+## v2.7.4
+- Fix prometheus reporting issue
+- Fix Promise.allOf should not block on empty input
+- Misc: Added project directory to sourceItems path
+- Add async start to untype stub
+
+## v2.7.3
+- Add wf type tag in decider metrics scope
+- Fix WorkflowStub.fromTyped method
+- Added missing fields to local activity task
+- Honor user timeout for get workflow result
+
+## v2.7.2
+- Fix leak in Async GetWorkflowExecutionHistory
+- Fix context timeout in execute workflow
+
+## v2.7.1
+- Fix a bug in build.gradle that prevented javadoc and sources from being published
+
+## v2.7.0
+- Add ParentClosePolicy to child workflows and also expose parent execution info for child workflows
+- Add context propagation
+- Fix various bugs around test workflow service and test mutable state implementation
+- Use thrift IDLs from uber/cadence-idl repo as a submodule
+- Various dependency updates including Docker base image and Gradle wrapper
+- Miscellaneous bug fixes
+
+## v2.6.3
+- Add Upsert Search Attributes
+- Support get search attributes inside workflow
+
+## v2.6.2
+- Cleanup threads created in signal method on decider close
+- Fixed exception propagation from child workflows
+
+## v2.6.1
+- Add missing metrics and tags
+- Add metrics for SCHEDULED_TO_STAR latency
+- Support filtering query based on close status
+- Documentation improvements
+
+## v2.6.0
+- Fix thread leak on non-deterministic error
+- Support Search Attributes on Start workflow
+- Make Worker.addWorkflowImplementationFactory method support 'options'
+
 ## v2.5.2
 - Add saga class that helps user to implement saga pattern in Cadence
 - Add activity tasklist rate limiter option to worker options
@@ -64,7 +196,7 @@ queries did not used cached workflows.
 ## v2.1.2
 - Requires minimum server release v0.4.0
 - Introduced WorkerFactory and FactoryOptions
-- Added sticky workflow execution, which is caching of a workflow object between decisions. It is enabled by default, 
+- Added sticky workflow execution, which is caching of a workflow object between decisions. It is enabled by default,
 to disable use FactoryOptions.disableStickyExecution property.
 - Updated Thrift to expose new types of service exceptions: ServiceBusyError, DomainNotActiveError, LimitExceededError
 - Added metric for corrupted signal as well as metrics related to caching and evictions.

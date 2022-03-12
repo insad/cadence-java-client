@@ -18,6 +18,7 @@
 package com.uber.cadence.internal.external;
 
 import com.google.common.base.Strings;
+import com.uber.cadence.Header;
 import com.uber.cadence.Memo;
 import com.uber.cadence.QueryWorkflowRequest;
 import com.uber.cadence.QueryWorkflowResponse;
@@ -33,6 +34,7 @@ import com.uber.cadence.TerminateWorkflowExecutionRequest;
 import com.uber.cadence.WorkflowExecution;
 import com.uber.cadence.WorkflowExecutionAlreadyStartedError;
 import com.uber.cadence.WorkflowQuery;
+import com.uber.cadence.common.RetryOptions;
 import com.uber.cadence.internal.common.*;
 import com.uber.cadence.internal.metrics.MetricsTag;
 import com.uber.cadence.internal.metrics.MetricsType;
@@ -42,10 +44,13 @@ import com.uber.cadence.serviceclient.IWorkflowService;
 import com.uber.m3.tally.Scope;
 import com.uber.m3.util.ImmutableMap;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import org.apache.thrift.TException;
+import org.apache.thrift.async.AsyncMethodCallback;
 
 public final class GenericWorkflowClientExternalImpl implements GenericWorkflowClientExternal {
 
@@ -76,19 +81,102 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     try {
       return startWorkflowInternal(startParameters);
     } finally {
-      // TODO: can probably cache this
-      Map<String, String> tags =
-          new ImmutableMap.Builder<String, String>(3)
-              .put(MetricsTag.WORKFLOW_TYPE, startParameters.getWorkflowType().getName())
-              .put(MetricsTag.TASK_LIST, startParameters.getTaskList())
-              .put(MetricsTag.DOMAIN, domain)
-              .build();
-      metricsScope.tagged(tags).counter(MetricsType.WORKFLOW_START_COUNTER).inc(1);
+      emitMetricsForStartWorkflow(startParameters);
     }
+  }
+
+  @Override
+  public CompletableFuture<WorkflowExecution> startWorkflowAsync(
+      StartWorkflowExecutionParameters startParameters) {
+
+    return startWorkflowAsync(startParameters, Long.MAX_VALUE);
+  }
+
+  @Override
+  public CompletableFuture<WorkflowExecution> startWorkflowAsync(
+      StartWorkflowExecutionParameters startParameters, Long timeoutInMillis) {
+
+    emitMetricsForStartWorkflow(startParameters);
+    return startWorkflowAsyncInternal(startParameters, timeoutInMillis);
+  }
+
+  private void emitMetricsForStartWorkflow(StartWorkflowExecutionParameters startParameters) {
+    // TODO: can probably cache this
+    Map<String, String> tags =
+        new ImmutableMap.Builder<String, String>(3)
+            .put(MetricsTag.WORKFLOW_TYPE, startParameters.getWorkflowType().getName())
+            .put(MetricsTag.TASK_LIST, startParameters.getTaskList())
+            .put(MetricsTag.DOMAIN, domain)
+            .build();
+    metricsScope.tagged(tags).counter(MetricsType.WORKFLOW_START_COUNTER).inc(1);
   }
 
   private WorkflowExecution startWorkflowInternal(StartWorkflowExecutionParameters startParameters)
       throws WorkflowExecutionAlreadyStartedError {
+
+    StartWorkflowExecutionRequest request = getStartRequest(startParameters);
+    StartWorkflowExecutionResponse result;
+    try {
+      result =
+          RpcRetryer.retryWithResult(
+              RpcRetryer.DEFAULT_RPC_RETRY_OPTIONS, () -> service.StartWorkflowExecution(request));
+    } catch (WorkflowExecutionAlreadyStartedError e) {
+      throw e;
+    } catch (TException e) {
+      throw CheckedExceptionWrapper.wrap(e);
+    }
+    WorkflowExecution execution = new WorkflowExecution();
+    execution.setRunId(result.getRunId());
+    execution.setWorkflowId(request.getWorkflowId());
+
+    return execution;
+  }
+
+  private RetryOptions getRetryOptionsWithExpiration(RetryOptions o, Long timeoutInMillis) {
+    if (timeoutInMillis == null || timeoutInMillis <= 0 || timeoutInMillis == Long.MAX_VALUE) {
+      return o;
+    }
+    return new RetryOptions.Builder(RpcRetryer.DEFAULT_RPC_RETRY_OPTIONS)
+        .setExpiration(Duration.ofMillis((timeoutInMillis)))
+        .build();
+  }
+
+  private CompletableFuture<WorkflowExecution> startWorkflowAsyncInternal(
+      StartWorkflowExecutionParameters startParameters, Long timeoutInMillis) {
+    StartWorkflowExecutionRequest request = getStartRequest(startParameters);
+
+    return RpcRetryer.retryWithResultAsync(
+        getRetryOptionsWithExpiration(RpcRetryer.DEFAULT_RPC_RETRY_OPTIONS, timeoutInMillis),
+        () -> {
+          CompletableFuture<WorkflowExecution> result = new CompletableFuture<>();
+          try {
+
+            service.StartWorkflowExecutionWithTimeout(
+                request,
+                new AsyncMethodCallback<StartWorkflowExecutionResponse>() {
+                  @Override
+                  public void onComplete(StartWorkflowExecutionResponse response) {
+                    WorkflowExecution execution = new WorkflowExecution();
+                    execution.setRunId(response.getRunId());
+                    execution.setWorkflowId(request.getWorkflowId());
+                    result.complete(execution);
+                  }
+
+                  @Override
+                  public void onError(Exception exception) {
+                    result.completeExceptionally(exception);
+                  }
+                },
+                timeoutInMillis);
+          } catch (TException e) {
+            result.completeExceptionally(e);
+          }
+          return result;
+        });
+  }
+
+  private StartWorkflowExecutionRequest getStartRequest(
+      StartWorkflowExecutionParameters startParameters) {
     StartWorkflowExecutionRequest request = new StartWorkflowExecutionRequest();
     request.setDomain(domain);
     if (startParameters.getInput() != null) {
@@ -121,27 +209,12 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     }
     request.setMemo(toMemoThrift(startParameters.getMemo()));
     request.setSearchAttributes(toSearchAttributesThrift(startParameters.getSearchAttributes()));
-
-    //        if(startParameters.getChildPolicy() != null) {
-    //            request.setChildPolicy(startParameters.getChildPolicy());
-    //        }
-
-    StartWorkflowExecutionResponse result;
-    try {
-      result =
-          Retryer.retryWithResult(
-              Retryer.DEFAULT_SERVICE_OPERATION_RETRY_OPTIONS,
-              () -> service.StartWorkflowExecution(request));
-    } catch (WorkflowExecutionAlreadyStartedError e) {
-      throw e;
-    } catch (TException e) {
-      throw CheckedExceptionWrapper.wrap(e);
+    request.setHeader(toHeaderThrift(startParameters.getContext()));
+    if (startParameters.getDelayStart() != null) {
+      request.setDelayStartSeconds((int) startParameters.getDelayStart().getSeconds());
     }
-    WorkflowExecution execution = new WorkflowExecution();
-    execution.setRunId(result.getRunId());
-    execution.setWorkflowId(request.getWorkflowId());
 
-    return execution;
+    return request;
   }
 
   private Memo toMemoThrift(Map<String, byte[]> memo) {
@@ -172,6 +245,19 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     return searchAttrThrift;
   }
 
+  private Header toHeaderThrift(Map<String, byte[]> headers) {
+    if (headers == null || headers.isEmpty()) {
+      return null;
+    }
+    Map<String, ByteBuffer> fields = new HashMap<>();
+    for (Map.Entry<String, byte[]> item : headers.entrySet()) {
+      fields.put(item.getKey(), ByteBuffer.wrap(item.getValue()));
+    }
+    Header headerThrift = new Header();
+    headerThrift.setFields(fields);
+    return headerThrift;
+  }
+
   private RetryPolicy toRetryPolicy(RetryParameters retryParameters) {
     return new RetryPolicy()
         .setBackoffCoefficient(retryParameters.getBackoffCoefficient())
@@ -184,22 +270,61 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
 
   @Override
   public void signalWorkflowExecution(SignalExternalWorkflowParameters signalParameters) {
+    SignalWorkflowExecutionRequest request = getSignalRequest(signalParameters);
+
+    try {
+      RpcRetryer.retry(() -> service.SignalWorkflowExecution(request));
+    } catch (TException e) {
+      throw CheckedExceptionWrapper.wrap(e);
+    }
+  }
+
+  @Override
+  public CompletableFuture<Void> signalWorkflowExecutionAsync(
+      SignalExternalWorkflowParameters signalParameters) {
+    return signalWorkflowExecutionAsync(signalParameters, Long.MAX_VALUE);
+  }
+
+  @Override
+  public CompletableFuture<Void> signalWorkflowExecutionAsync(
+      SignalExternalWorkflowParameters signalParameters, Long timeoutInMillis) {
+    SignalWorkflowExecutionRequest request = getSignalRequest(signalParameters);
+    return RpcRetryer.retryWithResultAsync(
+        getRetryOptionsWithExpiration(RpcRetryer.DEFAULT_RPC_RETRY_OPTIONS, timeoutInMillis),
+        () -> {
+          CompletableFuture<Void> result = new CompletableFuture<>();
+          try {
+            service.SignalWorkflowExecution(
+                request,
+                new AsyncMethodCallback() {
+                  @Override
+                  public void onComplete(Object response) {
+                    result.complete(null);
+                  }
+
+                  @Override
+                  public void onError(Exception exception) {
+                    result.completeExceptionally(exception);
+                  }
+                });
+          } catch (TException e) {
+            result.completeExceptionally(e);
+          }
+          return result;
+        });
+  }
+
+  private SignalWorkflowExecutionRequest getSignalRequest(
+      SignalExternalWorkflowParameters signalParameters) {
     SignalWorkflowExecutionRequest request = new SignalWorkflowExecutionRequest();
     request.setDomain(domain);
-
     request.setInput(signalParameters.getInput());
     request.setSignalName(signalParameters.getSignalName());
     WorkflowExecution execution = new WorkflowExecution();
     execution.setRunId(signalParameters.getRunId());
     execution.setWorkflowId(signalParameters.getWorkflowId());
     request.setWorkflowExecution(execution);
-    try {
-      Retryer.retry(
-          Retryer.DEFAULT_SERVICE_OPERATION_RETRY_OPTIONS,
-          () -> service.SignalWorkflowExecution(request));
-    } catch (TException e) {
-      throw CheckedExceptionWrapper.wrap(e);
-    }
+    return request;
   }
 
   @Override
@@ -257,11 +382,14 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     if (!Strings.isNullOrEmpty(startParameters.getCronSchedule())) {
       request.setCronSchedule(startParameters.getCronSchedule());
     }
+    if (startParameters.getDelayStart() != null) {
+      request.setDelayStartSeconds((int) startParameters.getDelayStart().getSeconds());
+    }
     StartWorkflowExecutionResponse result;
     try {
       result =
-          Retryer.retryWithResult(
-              Retryer.DEFAULT_SERVICE_OPERATION_RETRY_OPTIONS,
+          RpcRetryer.retryWithResult(
+              RpcRetryer.DEFAULT_RPC_RETRY_OPTIONS,
               () -> service.SignalWithStartWorkflowExecution(request));
     } catch (TException e) {
       throw CheckedExceptionWrapper.wrap(e);
@@ -278,9 +406,7 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     request.setDomain(domain);
     request.setWorkflowExecution(execution);
     try {
-      Retryer.retry(
-          Retryer.DEFAULT_SERVICE_OPERATION_RETRY_OPTIONS,
-          () -> service.RequestCancelWorkflowExecution(request));
+      RpcRetryer.retry(() -> service.RequestCancelWorkflowExecution(request));
     } catch (TException e) {
       throw CheckedExceptionWrapper.wrap(e);
     }
@@ -298,11 +424,11 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     query.setQueryType(queryParameters.getQueryType());
     request.setQuery(query);
     request.setQueryRejectCondition(queryParameters.getQueryRejectCondition());
+    request.setQueryConsistencyLevel(queryParameters.getQueryConsistencyLevel());
     try {
       QueryWorkflowResponse response =
-          Retryer.retryWithResult(
-              Retryer.DEFAULT_SERVICE_OPERATION_RETRY_OPTIONS,
-              () -> service.QueryWorkflow(request));
+          RpcRetryer.retryWithResult(
+              RpcRetryer.DEFAULT_RPC_RETRY_OPTIONS, () -> service.QueryWorkflow(request));
       return response;
     } catch (TException e) {
       throw CheckedExceptionWrapper.wrap(e);
@@ -324,9 +450,7 @@ public final class GenericWorkflowClientExternalImpl implements GenericWorkflowC
     request.setReason(terminateParameters.getReason());
     //        request.setChildPolicy(terminateParameters.getChildPolicy());
     try {
-      Retryer.retry(
-          Retryer.DEFAULT_SERVICE_OPERATION_RETRY_OPTIONS,
-          () -> service.TerminateWorkflowExecution(request));
+      RpcRetryer.retry(() -> service.TerminateWorkflowExecution(request));
     } catch (TException e) {
       throw CheckedExceptionWrapper.wrap(e);
     }

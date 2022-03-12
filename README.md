@@ -1,4 +1,4 @@
-# Java framework for Cadence [![Build Status](https://badge.buildkite.com/0c96b8b74c0921208e898c10a602e2fe9ecb7641c2befee0e7.svg?theme=github&branch=master)](https://buildkite.com/uberopensource/cadence-java-client) [![Javadocs](https://www.javadoc.io/badge/com.uber.cadence/cadence-client.svg)](https://www.javadoc.io/doc/com.uber.cadence/cadence-client)
+# Java framework for Cadence [![Build Status](https://badge.buildkite.com/0c96b8b74c0921208e898c10a602e2fe9ecb7641c2befee0e7.svg?theme=github&branch=master)](https://buildkite.com/uberopensource/cadence-java-client) [![Javadocs](https://www.javadoc.io/badge/com.uber.cadence/cadence-client.svg)](https://www.javadoc.io/doc/com.uber.cadence/cadence-client) [![Coverage Status](https://coveralls.io/repos/github/uber/cadence-java-client/badge.svg)](https://coveralls.io/github/uber/cadence-java-client)
 
 
 [Cadence](https://github.com/uber/cadence) is a distributed, scalable, durable, and highly available orchestration engine we developed at Uber Engineering to execute asynchronous long-running business logic in a scalable and resilient way.
@@ -31,16 +31,16 @@ Add *cadence-client* as a dependency to your *pom.xml*:
     <dependency>
       <groupId>com.uber.cadence</groupId>
       <artifactId>cadence-client</artifactId>
-      <version>2.4.1</version>
+      <version>3.0.0</version>
     </dependency>
     
 or to *build.gradle*:
 
-    compile group: 'com.uber.cadence', name: 'cadence-client', version: '2.4.1'
+    compile group: 'com.uber.cadence', name: 'cadence-client', version: '3.0.0'
 
 ## Documentation
 
-The documentation on how to use the Cadence Java client is [here](https://cadenceworkflow.io/docs/06_javaclient/).
+The documentation on how to use the Cadence Java client is [here](https://cadenceworkflow.io/docs/java-client/).
 
 Javadocs for the client API are located [here](https://www.javadoc.io/doc/com.uber.cadence/cadence-client).
 

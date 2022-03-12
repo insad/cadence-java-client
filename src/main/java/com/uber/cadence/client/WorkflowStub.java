@@ -1,7 +1,7 @@
 /*
+ *  Modifications Copyright (c) 2017-2021 Uber Technologies Inc.
+ *  Portions of the Software are attributed to Copyright (c) 2020 Temporal Technologies Inc.
  *  Copyright 2012-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- *  Modifications copyright (C) 2017 Uber Technologies, Inc.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"). You may not
  *  use this file except in compliance with the License. A copy of the License is
@@ -19,7 +19,8 @@ package com.uber.cadence.client;
 
 import com.uber.cadence.QueryRejectCondition;
 import com.uber.cadence.WorkflowExecution;
-import com.uber.cadence.internal.common.QueryResponse;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.lang.reflect.Type;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -44,18 +45,36 @@ public interface WorkflowStub {
    * @return untyped workflow stub for the same workflow instance.
    */
   static <T> WorkflowStub fromTyped(T typed) {
-    if (!(typed instanceof Supplier)) {
+    if (!(typed instanceof Proxy)) {
       throw new IllegalArgumentException(
           "arguments must be created through WorkflowClient.newWorkflowStub");
     }
+
+    InvocationHandler handler = Proxy.getInvocationHandler(typed);
+
+    if (!(handler instanceof Supplier)) {
+      throw new IllegalArgumentException(
+          "arguments must be created through WorkflowClient.newWorkflowStub");
+    }
+
     @SuppressWarnings("unchecked")
-    Supplier<WorkflowStub> supplier = (Supplier<WorkflowStub>) typed;
+    Supplier<WorkflowStub> supplier = (Supplier<WorkflowStub>) handler;
     return supplier.get();
   }
 
   void signal(String signalName, Object... args);
 
+  CompletableFuture<Void> signalAsync(String signalName, Object... args);
+
+  CompletableFuture<Void> signalAsyncWithTimeout(
+      long timeout, TimeUnit unit, String signalName, Object... args);
+
   WorkflowExecution start(Object... args);
+
+  CompletableFuture<WorkflowExecution> startAsync(Object... args);
+
+  CompletableFuture<WorkflowExecution> startAsyncWithTimeout(
+      long timeout, TimeUnit unit, Object... args);
 
   WorkflowExecution signalWithStart(String signalName, Object[] signalArgs, Object[] startArgs);
 
@@ -122,21 +141,52 @@ public interface WorkflowStub {
 
   <R> CompletableFuture<R> getResultAsync(long timeout, TimeUnit unit, Class<R> resultClass);
 
+  /**
+   * Query workflow by invoking its query handler. A query handler is a method annotated with {@link
+   * com.uber.cadence.workflow.QueryMethod}.
+   *
+   * @see WorkflowClientOptions.Builder#setQueryRejectCondition(QueryRejectCondition)
+   * @param queryType name of the query handler. Usually it is a method name.
+   * @param resultClass class of the query result type
+   * @param args optional query arguments
+   * @param <R> type of the query result
+   * @return query result
+   * @throws WorkflowQueryException if query failed for any reason.
+   */
   <R> R query(String queryType, Class<R> resultClass, Object... args);
 
+  /**
+   * Deprecated: please use {@link #queryWithOptions(String, QueryOptions, Type, Class, Object...)}
+   * to avoid variable argument ambiguity with Object... args
+   */
   <R> R query(String queryType, Class<R> resultClass, Type resultType, Object... args);
 
-  <R> QueryResponse<R> query(
+  /**
+   * Deprecated: please use {@link #queryWithOptions(String, QueryOptions, Type, Class, Object...)}
+   * to avoid variable argument ambiguity with Object... args
+   */
+  <R> R query(
       String queryType,
       Class<R> resultClass,
       QueryRejectCondition queryRejectCondition,
       Object... args);
 
-  <R> QueryResponse<R> query(
+  /**
+   * Deprecated: please use {@link #queryWithOptions(String, QueryOptions, Type, Class, Object...)}
+   * to avoid variable argument ambiguity with Object... args
+   */
+  <R> R query(
       String queryType,
       Class<R> resultClass,
       Type resultType,
       QueryRejectCondition queryRejectCondition,
+      Object... args);
+
+  <R> R queryWithOptions(
+      String queryType,
+      QueryOptions options,
+      Type resultType,
+      Class<R> resultClass,
       Object... args);
 
   /** Request cancellation. */

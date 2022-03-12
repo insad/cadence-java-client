@@ -7,3 +7,10 @@ target
 .gradle
 /build
 /out
+dummy
+$buildDir
+src/main/idls/*
+/bin
+.classpath
+.project
+.settings

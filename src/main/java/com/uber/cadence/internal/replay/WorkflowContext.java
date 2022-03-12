@@ -18,6 +18,11 @@
 package com.uber.cadence.internal.replay;
 
 import com.uber.cadence.*;
+import com.uber.cadence.context.ContextPropagator;
+import java.nio.ByteBuffer;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 final class WorkflowContext {
 
@@ -29,15 +34,20 @@ final class WorkflowContext {
   // RunId can change when reset happens. This remembers the actual runId that is used
   // as in this particular part of the history.
   private String currentRunId;
+  private SearchAttributes searchAttributes;
+  private List<ContextPropagator> contextPropagators;
 
   WorkflowContext(
       String domain,
       PollForDecisionTaskResponse decisionTask,
-      WorkflowExecutionStartedEventAttributes startedAttributes) {
+      WorkflowExecutionStartedEventAttributes startedAttributes,
+      List<ContextPropagator> contextPropagators) {
     this.domain = domain;
     this.decisionTask = decisionTask;
     this.startedAttributes = startedAttributes;
     this.currentRunId = startedAttributes.getOriginalExecutionRunId();
+    this.searchAttributes = startedAttributes.getSearchAttributes();
+    this.contextPropagators = contextPropagators;
   }
 
   WorkflowExecution getWorkflowExecution() {
@@ -80,12 +90,6 @@ final class WorkflowContext {
   }
 
   // TODO: Implement as soon as WorkflowExecutionStartedEventAttributes have these fields added.
-  ////    WorkflowExecution getParentWorkflowExecution() {
-  //        WorkflowExecutionStartedEventAttributes attributes =
-  // getWorkflowStartedEventAttributes();
-  //        return attributes.getParentWorkflowExecution();
-  //    }
-
   ////    com.uber.cadence.ChildPolicy getChildPolicy() {
   //        WorkflowExecutionStartedEventAttributes attributes =
   // getWorkflowStartedEventAttributes();
@@ -97,6 +101,11 @@ final class WorkflowContext {
   // getWorkflowStartedEventAttributes();
   //        return attributes.getContinuedExecutionRunId();
   //    }
+
+  WorkflowExecution getParentWorkflowExecution() {
+    WorkflowExecutionStartedEventAttributes attributes = getWorkflowStartedEventAttributes();
+    return attributes.getParentWorkflowExecution();
+  }
 
   int getExecutionStartToCloseTimeoutSeconds() {
     WorkflowExecutionStartedEventAttributes attributes = getWorkflowStartedEventAttributes();
@@ -120,15 +129,68 @@ final class WorkflowContext {
     return startedAttributes;
   }
 
-  public ChildPolicy getChildPolicy() {
-    return startedAttributes.getChildPolicy();
-  }
-
   void setCurrentRunId(String currentRunId) {
     this.currentRunId = currentRunId;
   }
 
   String getCurrentRunId() {
     return currentRunId;
+  }
+
+  SearchAttributes getSearchAttributes() {
+    return searchAttributes;
+  }
+
+  public List<ContextPropagator> getContextPropagators() {
+    return contextPropagators;
+  }
+
+  /** Returns a map of propagated context objects, keyed by propagator name */
+  Map<String, Object> getPropagatedContexts() {
+    if (contextPropagators == null || contextPropagators.isEmpty()) {
+      return new HashMap<>();
+    }
+
+    Header headers = startedAttributes.getHeader();
+    if (headers == null) {
+      return new HashMap<>();
+    }
+
+    Map<String, byte[]> headerData = new HashMap<>();
+    headers
+        .getFields()
+        .forEach(
+            (k, v) -> {
+              headerData.put(k, org.apache.thrift.TBaseHelper.byteBufferToByteArray(v));
+            });
+
+    Map<String, Object> contextData = new HashMap<>();
+    for (ContextPropagator propagator : contextPropagators) {
+      contextData.put(propagator.getName(), propagator.deserializeContext(headerData));
+    }
+
+    return contextData;
+  }
+
+  void mergeSearchAttributes(SearchAttributes searchAttributes) {
+    if (searchAttributes == null) {
+      return;
+    }
+    if (this.searchAttributes == null) {
+      this.searchAttributes = newSearchAttributes();
+    }
+    Map<String, ByteBuffer> current = this.searchAttributes.getIndexedFields();
+    searchAttributes
+        .getIndexedFields()
+        .forEach(
+            (k, v) -> {
+              current.put(k, v);
+            });
+  }
+
+  private SearchAttributes newSearchAttributes() {
+    SearchAttributes result = new SearchAttributes();
+    result.setIndexedFields(new HashMap<String, ByteBuffer>());
+    return result;
   }
 }

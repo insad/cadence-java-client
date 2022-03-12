@@ -1,7 +1,7 @@
 /*
+ *  Modifications Copyright (c) 2017-2020 Uber Technologies Inc.
+ *  Portions of the Software are attributed to Copyright (c) 2020 Temporal Technologies Inc.
  *  Copyright 2012-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- *  Modifications copyright (C) 2017 Uber Technologies, Inc.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"). You may not
  *  use this file except in compliance with the License. A copy of the License is
@@ -17,35 +17,40 @@
 
 package com.uber.cadence.internal.worker;
 
-import com.uber.cadence.*;
-import com.uber.cadence.common.RetryOptions;
-import com.uber.cadence.internal.common.Retryer;
+import com.uber.cadence.Header;
+import com.uber.cadence.PollForActivityTaskResponse;
+import com.uber.cadence.RespondActivityTaskCanceledRequest;
+import com.uber.cadence.RespondActivityTaskCompletedRequest;
+import com.uber.cadence.RespondActivityTaskFailedRequest;
+import com.uber.cadence.WorkflowExecution;
+import com.uber.cadence.context.ContextPropagator;
+import com.uber.cadence.internal.common.RpcRetryer;
 import com.uber.cadence.internal.logging.LoggerTag;
 import com.uber.cadence.internal.metrics.MetricsTag;
 import com.uber.cadence.internal.metrics.MetricsType;
 import com.uber.cadence.internal.worker.ActivityTaskHandler.Result;
+import com.uber.cadence.internal.worker.Poller.PollTask;
 import com.uber.cadence.serviceclient.IWorkflowService;
 import com.uber.m3.tally.Scope;
 import com.uber.m3.tally.Stopwatch;
 import com.uber.m3.util.Duration;
 import com.uber.m3.util.ImmutableMap;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import org.apache.thrift.TException;
 import org.slf4j.MDC;
 
-public final class ActivityWorker implements SuspendableWorker {
+public class ActivityWorker extends SuspendableWorkerBase {
 
-  private static final String POLL_THREAD_NAME_PREFIX = "Activity Poller taskList=";
-
-  private SuspendableWorker poller = new NoopSuspendableWorker();
+  protected final SingleWorkerOptions options;
   private final ActivityTaskHandler handler;
   private final IWorkflowService service;
   private final String domain;
   private final String taskList;
-  private final SingleWorkerOptions options;
 
   public ActivityWorker(
       IWorkflowService service,
@@ -53,6 +58,16 @@ public final class ActivityWorker implements SuspendableWorker {
       String taskList,
       SingleWorkerOptions options,
       ActivityTaskHandler handler) {
+    this(service, domain, taskList, options, handler, "Activity Poller taskList=");
+  }
+
+  public ActivityWorker(
+      IWorkflowService service,
+      String domain,
+      String taskList,
+      SingleWorkerOptions options,
+      ActivityTaskHandler handler,
+      String pollThreadNamePrefix) {
     this.service = Objects.requireNonNull(service);
     this.domain = Objects.requireNonNull(domain);
     this.taskList = Objects.requireNonNull(taskList);
@@ -61,89 +76,36 @@ public final class ActivityWorker implements SuspendableWorker {
     PollerOptions pollerOptions = options.getPollerOptions();
     if (pollerOptions.getPollThreadNamePrefix() == null) {
       pollerOptions =
-          new PollerOptions.Builder(pollerOptions)
+          PollerOptions.newBuilder(pollerOptions)
               .setPollThreadNamePrefix(
-                  POLL_THREAD_NAME_PREFIX + "\"" + taskList + "\", domain=\"" + domain + "\"")
+                  pollThreadNamePrefix + "\"" + taskList + "\", domain=\"" + domain + "\"")
               .build();
     }
-    this.options = new SingleWorkerOptions.Builder(options).setPollerOptions(pollerOptions).build();
+    this.options = SingleWorkerOptions.newBuilder(options).setPollerOptions(pollerOptions).build();
   }
 
   @Override
   public void start() {
     if (handler.isAnyTypeSupported()) {
-      poller =
+      SuspendableWorker poller =
           new Poller<>(
               options.getIdentity(),
-              new ActivityPollTask(service, domain, taskList, options),
+              getOrCreateActivityPollTask(),
               new PollTaskExecutor<>(domain, taskList, options, new TaskHandlerImpl(handler)),
               options.getPollerOptions(),
               options.getMetricsScope());
       poller.start();
+      setPoller(poller);
       options.getMetricsScope().counter(MetricsType.WORKER_START_COUNTER).inc(1);
     }
   }
 
-  @Override
-  public boolean isStarted() {
-    return poller.isStarted();
+  protected PollTask<PollForActivityTaskResponse> getOrCreateActivityPollTask() {
+    return new ActivityPollTask(service, domain, taskList, options);
   }
 
-  @Override
-  public boolean isShutdown() {
-    return poller.isShutdown();
-  }
-
-  @Override
-  public boolean isTerminated() {
-    return poller.isTerminated();
-  }
-
-  @Override
-  public void shutdown() {
-    poller.shutdown();
-  }
-
-  @Override
-  public void shutdownNow() {
-    poller.shutdownNow();
-  }
-
-  @Override
-  public void awaitTermination(long timeout, TimeUnit unit) {
-    poller.awaitTermination(timeout, unit);
-  }
-
-  @Override
-  public void suspendPolling() {
-    poller.suspendPolling();
-  }
-
-  @Override
-  public void resumePolling() {
-    poller.resumePolling();
-  }
-
-  @Override
-  public boolean isSuspended() {
-    return poller.isSuspended();
-  }
-
-  static class MeasurableActivityTask {
-    PollForActivityTaskResponse task;
-    Stopwatch sw;
-
-    MeasurableActivityTask(PollForActivityTaskResponse task, Stopwatch sw) {
-      this.task = Objects.requireNonNull(task);
-      this.sw = Objects.requireNonNull(sw);
-    }
-
-    void markDone() {
-      sw.stop();
-    }
-  }
-
-  private class TaskHandlerImpl implements PollTaskExecutor.TaskHandler<MeasurableActivityTask> {
+  private class TaskHandlerImpl
+      implements PollTaskExecutor.TaskHandler<PollForActivityTaskResponse> {
 
     final ActivityTaskHandler handler;
 
@@ -152,41 +114,52 @@ public final class ActivityWorker implements SuspendableWorker {
     }
 
     @Override
-    public void handle(MeasurableActivityTask task) throws Exception {
+    public void handle(PollForActivityTaskResponse task) throws Exception {
       Scope metricsScope =
           options
               .getMetricsScope()
               .tagged(
-                  ImmutableMap.of(MetricsTag.ACTIVITY_TYPE, task.task.getActivityType().getName()));
+                  ImmutableMap.of(
+                      MetricsTag.ACTIVITY_TYPE,
+                      task.getActivityType().getName(),
+                      MetricsTag.WORKFLOW_TYPE,
+                      task.getWorkflowType().getName()));
+
       metricsScope
-          .timer(MetricsType.TASK_LIST_QUEUE_LATENCY)
+          .timer(MetricsType.ACTIVITY_SCHEDULED_TO_START_LATENCY)
           .record(
               Duration.ofNanos(
-                  task.task.getStartedTimestamp() - task.task.getScheduledTimestamp()));
+                  task.getStartedTimestamp() - task.getScheduledTimestampOfThisAttempt()));
 
       // The following tags are for logging.
-      MDC.put(LoggerTag.ACTIVITY_ID, task.task.getActivityId());
-      MDC.put(LoggerTag.ACTIVITY_TYPE, task.task.getActivityType().getName());
-      MDC.put(LoggerTag.WORKFLOW_ID, task.task.getWorkflowExecution().getWorkflowId());
-      MDC.put(LoggerTag.RUN_ID, task.task.getWorkflowExecution().getRunId());
+      MDC.put(LoggerTag.ACTIVITY_ID, task.getActivityId());
+      MDC.put(LoggerTag.ACTIVITY_TYPE, task.getActivityType().getName());
+      MDC.put(LoggerTag.WORKFLOW_ID, task.getWorkflowExecution().getWorkflowId());
+      MDC.put(LoggerTag.RUN_ID, task.getWorkflowExecution().getRunId());
+
+      propagateContext(task);
 
       try {
         Stopwatch sw = metricsScope.timer(MetricsType.ACTIVITY_EXEC_LATENCY).start();
-        ActivityTaskHandler.Result response = handler.handle(task.task, metricsScope, false);
+        ActivityTaskHandler.Result response = handler.handle(task, metricsScope, false);
         sw.stop();
 
         sw = metricsScope.timer(MetricsType.ACTIVITY_RESP_LATENCY).start();
-        sendReply(task.task, response, metricsScope);
+        sendReply(task, response, metricsScope);
         sw.stop();
 
-        task.markDone();
+        long nanoTime =
+            TimeUnit.NANOSECONDS.convert(System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+        Duration duration = Duration.ofNanos(nanoTime - task.getScheduledTimestampOfThisAttempt());
+        metricsScope.timer(MetricsType.ACTIVITY_E2E_LATENCY).record(duration);
+
       } catch (CancellationException e) {
         RespondActivityTaskCanceledRequest cancelledRequest =
             new RespondActivityTaskCanceledRequest();
         cancelledRequest.setDetails(
             String.valueOf(e.getMessage()).getBytes(StandardCharsets.UTF_8));
         Stopwatch sw = metricsScope.timer(MetricsType.ACTIVITY_RESP_LATENCY).start();
-        sendReply(task.task, new Result(null, null, cancelledRequest, null), metricsScope);
+        sendReply(task, new Result(null, null, cancelledRequest), metricsScope);
         sw.stop();
       } finally {
         MDC.remove(LoggerTag.ACTIVITY_ID);
@@ -196,67 +169,67 @@ public final class ActivityWorker implements SuspendableWorker {
       }
     }
 
+    void propagateContext(PollForActivityTaskResponse response) {
+      if (options.getContextPropagators() == null || options.getContextPropagators().isEmpty()) {
+        return;
+      }
+
+      Header headers = response.getHeader();
+      if (headers == null) {
+        return;
+      }
+
+      Map<String, byte[]> headerData = new HashMap<>();
+      headers
+          .getFields()
+          .forEach(
+              (k, v) -> {
+                headerData.put(k, org.apache.thrift.TBaseHelper.byteBufferToByteArray(v));
+              });
+
+      for (ContextPropagator propagator : options.getContextPropagators()) {
+        propagator.setCurrentContext(propagator.deserializeContext(headerData));
+      }
+    }
+
     @Override
-    public Throwable wrapFailure(MeasurableActivityTask task, Throwable failure) {
-      WorkflowExecution execution = task.task.getWorkflowExecution();
+    public Throwable wrapFailure(PollForActivityTaskResponse task, Throwable failure) {
+      WorkflowExecution execution = task.getWorkflowExecution();
       return new RuntimeException(
           "Failure processing activity task. WorkflowID="
               + execution.getWorkflowId()
               + ", RunID="
               + execution.getRunId()
               + ", ActivityType="
-              + task.task.getActivityType().getName()
+              + task.getActivityType().getName()
               + ", ActivityID="
-              + task.task.getActivityId(),
+              + task.getActivityId(),
           failure);
     }
 
     private void sendReply(
         PollForActivityTaskResponse task, ActivityTaskHandler.Result response, Scope metricsScope)
         throws TException {
-      RetryOptions ro = response.getRequestRetryOptions();
       RespondActivityTaskCompletedRequest taskCompleted = response.getTaskCompleted();
       if (taskCompleted != null) {
-        ro =
-            options
-                .getReportCompletionRetryOptions()
-                .merge(ro)
-                .addDoNotRetry(
-                    BadRequestError.class, EntityNotExistsError.class, DomainNotActiveError.class);
         taskCompleted.setTaskToken(task.getTaskToken());
         taskCompleted.setIdentity(options.getIdentity());
-        Retryer.retry(ro, () -> service.RespondActivityTaskCompleted(taskCompleted));
+        RpcRetryer.retry(() -> service.RespondActivityTaskCompleted(taskCompleted));
         metricsScope.counter(MetricsType.ACTIVITY_TASK_COMPLETED_COUNTER).inc(1);
       } else {
         if (response.getTaskFailedResult() != null) {
           RespondActivityTaskFailedRequest taskFailed =
               response.getTaskFailedResult().getTaskFailedRequest();
-          ro =
-              options
-                  .getReportFailureRetryOptions()
-                  .merge(ro)
-                  .addDoNotRetry(
-                      BadRequestError.class,
-                      EntityNotExistsError.class,
-                      DomainNotActiveError.class);
           taskFailed.setTaskToken(task.getTaskToken());
           taskFailed.setIdentity(options.getIdentity());
-          Retryer.retry(ro, () -> service.RespondActivityTaskFailed(taskFailed));
+          RpcRetryer.retry(() -> service.RespondActivityTaskFailed(taskFailed));
           metricsScope.counter(MetricsType.ACTIVITY_TASK_FAILED_COUNTER).inc(1);
         } else {
           RespondActivityTaskCanceledRequest taskCancelled = response.getTaskCancelled();
           if (taskCancelled != null) {
             taskCancelled.setTaskToken(task.getTaskToken());
             taskCancelled.setIdentity(options.getIdentity());
-            ro =
-                options
-                    .getReportFailureRetryOptions()
-                    .merge(ro)
-                    .addDoNotRetry(
-                        BadRequestError.class,
-                        EntityNotExistsError.class,
-                        DomainNotActiveError.class);
-            Retryer.retry(ro, () -> service.RespondActivityTaskCanceled(taskCancelled));
+            RpcRetryer.retry(() -> service.RespondActivityTaskCanceled(taskCancelled));
             metricsScope.counter(MetricsType.ACTIVITY_TASK_CANCELED_COUNTER).inc(1);
           }
         }

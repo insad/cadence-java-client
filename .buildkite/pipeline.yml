@@ -1,9 +1,21 @@
 steps:
+  - label: "fossa analyze"
+    agents:
+      queue: "init"
+      docker: "*"
+    command: ".buildkite/scripts/fossa.sh"
   - label: ":java: Unit test with test services"
     agents:
       queue: "workers"
       docker: "*"
-    command: "./gradlew test"
+    command: "./gradlew --no-daemon test jacocoTestReport"
+    artifact_paths:
+      - "build/reports/jacoco/test/*.xml"
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: "*"
+          limit: 3
     plugins:
       - docker-compose#v3.0.0:
           run: unit-test-test-service
@@ -13,7 +25,12 @@ steps:
     agents:
       queue: "workers"
       docker: "*"
-    command: "./gradlew test"
+    command: "./gradlew --no-daemon test"
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: "*"
+          limit: 3
     plugins:
       - docker-compose#v3.0.0:
           run: unit-test-docker-sticky-on
@@ -23,9 +40,28 @@ steps:
     agents:
       queue: "workers"
       docker: "*"
-    command: "./gradlew test"
+    command: "./gradlew --no-daemon test"
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: "*"
+          limit: 3
     plugins:
       - docker-compose#v3.0.0:
           run: unit-test-docker-sticky-off
           config: docker/buildkite/docker-compose.yaml
   - wait
+
+  - label: ":java: Report test coverage"
+    agents:
+      queue: "workers"
+      docker: "*"
+    command: ".buildkite/scripts/coverage.sh"
+    retry:
+      automatic:
+        - exit_status: "*"
+          limit: 3
+    plugins:
+      - docker-compose#v3.0.0:
+          run: test-coverage-report
+          config: docker/buildkite/docker-compose.yaml

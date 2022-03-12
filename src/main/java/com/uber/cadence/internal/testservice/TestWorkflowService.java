@@ -19,6 +19,7 @@ package com.uber.cadence.internal.testservice;
 
 import com.uber.cadence.BadRequestError;
 import com.uber.cadence.ClientVersionNotSupportedError;
+import com.uber.cadence.ClusterInfo;
 import com.uber.cadence.CountWorkflowExecutionsRequest;
 import com.uber.cadence.CountWorkflowExecutionsResponse;
 import com.uber.cadence.DeprecateDomainRequest;
@@ -32,16 +33,22 @@ import com.uber.cadence.DomainAlreadyExistsError;
 import com.uber.cadence.DomainNotActiveError;
 import com.uber.cadence.EntityNotExistsError;
 import com.uber.cadence.GetSearchAttributesResponse;
+import com.uber.cadence.GetTaskListsByDomainRequest;
+import com.uber.cadence.GetTaskListsByDomainResponse;
 import com.uber.cadence.GetWorkflowExecutionHistoryRequest;
 import com.uber.cadence.GetWorkflowExecutionHistoryResponse;
 import com.uber.cadence.InternalServiceError;
 import com.uber.cadence.LimitExceededError;
+import com.uber.cadence.ListArchivedWorkflowExecutionsRequest;
+import com.uber.cadence.ListArchivedWorkflowExecutionsResponse;
 import com.uber.cadence.ListClosedWorkflowExecutionsRequest;
 import com.uber.cadence.ListClosedWorkflowExecutionsResponse;
 import com.uber.cadence.ListDomainsRequest;
 import com.uber.cadence.ListDomainsResponse;
 import com.uber.cadence.ListOpenWorkflowExecutionsRequest;
 import com.uber.cadence.ListOpenWorkflowExecutionsResponse;
+import com.uber.cadence.ListTaskListPartitionsRequest;
+import com.uber.cadence.ListTaskListPartitionsResponse;
 import com.uber.cadence.ListWorkflowExecutionsRequest;
 import com.uber.cadence.ListWorkflowExecutionsResponse;
 import com.uber.cadence.PollForActivityTaskRequest;
@@ -82,6 +89,7 @@ import com.uber.cadence.TerminateWorkflowExecutionRequest;
 import com.uber.cadence.UpdateDomainRequest;
 import com.uber.cadence.UpdateDomainResponse;
 import com.uber.cadence.WorkflowExecution;
+import com.uber.cadence.WorkflowExecutionAlreadyCompletedError;
 import com.uber.cadence.WorkflowExecutionAlreadyStartedError;
 import com.uber.cadence.WorkflowExecutionCloseStatus;
 import com.uber.cadence.WorkflowExecutionContinuedAsNewEventAttributes;
@@ -205,6 +213,13 @@ public final class TestWorkflowService implements IWorkflowService {
   }
 
   @Override
+  public GetTaskListsByDomainResponse GetTaskListsByDomain(GetTaskListsByDomainRequest request)
+      throws BadRequestError, EntityNotExistsError, LimitExceededError, ServiceBusyError,
+          ClientVersionNotSupportedError, TException {
+    throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
   public StartWorkflowExecutionResponse StartWorkflowExecution(
       StartWorkflowExecutionRequest startRequest) throws TException {
     return startWorkflowExecutionImpl(
@@ -245,7 +260,7 @@ public final class TestWorkflowService implements IWorkflowService {
       Optional<RetryState> retryState = newRetryStateLocked(retryPolicy);
       return startWorkflowExecutionNoRunningCheckLocked(
           startRequest,
-          false,
+          Optional.empty(),
           retryState,
           backoffStartIntervalInSeconds,
           null,
@@ -283,7 +298,7 @@ public final class TestWorkflowService implements IWorkflowService {
 
   private StartWorkflowExecutionResponse startWorkflowExecutionNoRunningCheckLocked(
       StartWorkflowExecutionRequest startRequest,
-      boolean continuedAsNew,
+      Optional<String> continuedExecutionRunId,
       Optional<RetryState> retryState,
       int backoffStartIntervalInSeconds,
       byte[] lastCompletionResult,
@@ -301,13 +316,14 @@ public final class TestWorkflowService implements IWorkflowService {
             lastCompletionResult,
             parent,
             parentChildInitiatedEventId,
+            continuedExecutionRunId,
             this,
             store);
     WorkflowExecution execution = mutableState.getExecutionId().getExecution();
     ExecutionId executionId = new ExecutionId(domain, execution);
     executionsByWorkflowId.put(workflowId, mutableState);
     executions.put(executionId, mutableState);
-    mutableState.startWorkflow(continuedAsNew, signalWithStartSignal);
+    mutableState.startWorkflow(continuedExecutionRunId.isPresent(), signalWithStartSignal);
     return new StartWorkflowExecutionResponse().setRunId(execution.getRunId());
   }
 
@@ -320,6 +336,15 @@ public final class TestWorkflowService implements IWorkflowService {
     TestWorkflowMutableState mutableState = getMutableState(executionId);
 
     return store.getWorkflowExecutionHistory(mutableState.getExecutionId(), getRequest);
+  }
+
+  @Override
+  public GetWorkflowExecutionHistoryResponse GetWorkflowExecutionHistoryWithTimeout(
+      GetWorkflowExecutionHistoryRequest getRequest, Long timeoutInMillis)
+      throws BadRequestError, InternalServiceError, EntityNotExistsError, ServiceBusyError,
+          TException {
+
+    return GetWorkflowExecutionHistory(getRequest);
   }
 
   @Override
@@ -552,7 +577,8 @@ public final class TestWorkflowService implements IWorkflowService {
       String signalId,
       SignalExternalWorkflowExecutionDecisionAttributes a,
       TestWorkflowMutableState source)
-      throws InternalServiceError, EntityNotExistsError, BadRequestError {
+      throws InternalServiceError, EntityNotExistsError, WorkflowExecutionAlreadyCompletedError,
+          BadRequestError {
     ExecutionId executionId = new ExecutionId(a.getDomain(), a.getExecution());
     TestWorkflowMutableState mutableState = null;
     try {
@@ -598,8 +624,7 @@ public final class TestWorkflowService implements IWorkflowService {
             .setWorkflowIdReusePolicy(previousRunStartRequest.getWorkflowIdReusePolicy())
             .setIdentity(identity)
             .setRetryPolicy(previousRunStartRequest.getRetryPolicy())
-            .setCronSchedule(previousRunStartRequest.getCronSchedule())
-            .setChildPolicy(previousRunStartRequest.getChildPolicy());
+            .setCronSchedule(previousRunStartRequest.getCronSchedule());
     if (a.isSetInput()) {
       startRequest.setInput(a.getInput());
     }
@@ -608,7 +633,7 @@ public final class TestWorkflowService implements IWorkflowService {
       StartWorkflowExecutionResponse response =
           startWorkflowExecutionNoRunningCheckLocked(
               startRequest,
-              true,
+              Optional.of(executionId.getExecution().getRunId()),
               retryState,
               a.getBackoffStartIntervalInSeconds(),
               a.getLastCompletionResult(),
@@ -663,6 +688,14 @@ public final class TestWorkflowService implements IWorkflowService {
   public ListWorkflowExecutionsResponse ListWorkflowExecutions(
       ListWorkflowExecutionsRequest listRequest)
       throws BadRequestError, InternalServiceError, EntityNotExistsError, ServiceBusyError,
+          ClientVersionNotSupportedError, TException {
+    throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
+  public ListArchivedWorkflowExecutionsResponse ListArchivedWorkflowExecutions(
+      ListArchivedWorkflowExecutionsRequest listRequest)
+      throws BadRequestError, EntityNotExistsError, ServiceBusyError,
           ClientVersionNotSupportedError, TException {
     throw new UnsupportedOperationException("not implemented");
   }
@@ -728,6 +761,19 @@ public final class TestWorkflowService implements IWorkflowService {
   }
 
   @Override
+  public ClusterInfo GetClusterInfo() throws InternalServiceError, ServiceBusyError, TException {
+    throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
+  public ListTaskListPartitionsResponse ListTaskListPartitions(
+      ListTaskListPartitionsRequest request)
+      throws BadRequestError, EntityNotExistsError, LimitExceededError, ServiceBusyError,
+          TException {
+    throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
   public void RegisterDomain(
       RegisterDomainRequest registerRequest, AsyncMethodCallback resultHandler) throws TException {
     throw new UnsupportedOperationException("not implemented");
@@ -759,10 +805,34 @@ public final class TestWorkflowService implements IWorkflowService {
   }
 
   @Override
+  public void GetTaskListsByDomain(
+      GetTaskListsByDomainRequest request, AsyncMethodCallback resultHandler)
+      throws org.apache.thrift.TException {
+    throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
   public void StartWorkflowExecution(
       StartWorkflowExecutionRequest startRequest, AsyncMethodCallback resultHandler)
       throws TException {
-    throw new UnsupportedOperationException("not implemented");
+    StartWorkflowExecutionWithTimeout(startRequest, resultHandler, null);
+  }
+
+  @Override
+  public void StartWorkflowExecutionWithTimeout(
+      StartWorkflowExecutionRequest startRequest,
+      AsyncMethodCallback resultHandler,
+      Long timeoutInMillis)
+      throws TException {
+    forkJoinPool.execute(
+        () -> {
+          try {
+            StartWorkflowExecutionResponse result = StartWorkflowExecution(startRequest);
+            resultHandler.onComplete(result);
+          } catch (TException e) {
+            resultHandler.onError(e);
+          }
+        });
   }
 
   @SuppressWarnings("unchecked") // Generator ignores that AsyncMethodCallback is generic
@@ -779,6 +849,23 @@ public final class TestWorkflowService implements IWorkflowService {
             resultHandler.onError(e);
           }
         });
+  }
+
+  @SuppressWarnings("unchecked") // Generator ignores that AsyncMethodCallback is generic
+  @Override
+  public void GetWorkflowExecutionHistoryWithTimeout(
+      GetWorkflowExecutionHistoryRequest getRequest,
+      AsyncMethodCallback resultHandler,
+      Long timeoutInMillis)
+      throws TException {
+    GetWorkflowExecutionHistory(getRequest, resultHandler);
+  }
+
+  @Override
+  public CompletableFuture<Boolean> isHealthy() {
+    CompletableFuture<Boolean> rval = new CompletableFuture<>();
+    rval.complete(Boolean.TRUE);
+    return rval;
   }
 
   @Override
@@ -874,7 +961,24 @@ public final class TestWorkflowService implements IWorkflowService {
   public void SignalWorkflowExecution(
       SignalWorkflowExecutionRequest signalRequest, AsyncMethodCallback resultHandler)
       throws TException {
-    throw new UnsupportedOperationException("not implemented");
+    SignalWorkflowExecutionWithTimeout(signalRequest, resultHandler, null);
+  }
+
+  @Override
+  public void SignalWorkflowExecutionWithTimeout(
+      SignalWorkflowExecutionRequest signalRequest,
+      AsyncMethodCallback resultHandler,
+      Long timeoutInMillis)
+      throws TException {
+    forkJoinPool.execute(
+        () -> {
+          try {
+            SignalWorkflowExecution(signalRequest);
+            resultHandler.onComplete(null);
+          } catch (TException e) {
+            resultHandler.onError(e);
+          }
+        });
   }
 
   @Override
@@ -917,6 +1021,11 @@ public final class TestWorkflowService implements IWorkflowService {
       throws TException {
     throw new UnsupportedOperationException("not implemented");
   }
+
+  @Override
+  public void ListArchivedWorkflowExecutions(
+      ListArchivedWorkflowExecutionsRequest listRequest, AsyncMethodCallback resultHandler)
+      throws TException {}
 
   @Override
   public void ScanWorkflowExecutions(
@@ -969,6 +1078,13 @@ public final class TestWorkflowService implements IWorkflowService {
       throws TException {
     throw new UnsupportedOperationException("not implemented");
   }
+
+  @Override
+  public void GetClusterInfo(AsyncMethodCallback resultHandler) throws TException {}
+
+  @Override
+  public void ListTaskListPartitions(
+      ListTaskListPartitionsRequest request, AsyncMethodCallback resultHandler) throws TException {}
 
   private <R> R requireNotNull(String fieldName, R value) throws BadRequestError {
     if (value == null) {
